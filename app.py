@@ -4,16 +4,19 @@ from google.genai import types
 import tempfile
 import os
 import time
+import json
+import re
+import fitz  # PyMuPDF สำหรับจัดการและวาดโน้ตลงใน PDF
 
 # ตั้งค่าหน้าเว็บ
 st.set_page_config(
-    page_title="PDF PO & Quotation Auditor", 
+    page_title="PDF Auto-Correction & Note Annotation", 
     page_icon="📄", 
     layout="wide"
 )
 
-st.title("📄 ระบบตรวจสอบความถูกต้อง PO กับ Quotation ด้วย AI")
-st.caption("เปรียบเทียบไฟล์ Quotation (File A) กับไฟล์ PO (File B) เจาะจงเฉพาะ Description, ราคา และจำนวน พร้อมสรุปรายงานแบบละเอียด")
+st.title("📄 ระบบตรวจสอบและทำโน้ตแก้ไขไฟล์ PO บน PDF ด้วย AI")
+st.caption("เปรียบเทียบไฟล์ Quotation กับ PO พร้อมสร้างไฟล์ PDF ฉบับแก้ไข (ขีดค่าคำผิดและแปะโน้ตคำที่ถูกต้องให้อัตโนมัติ)")
 
 # ช่องกรอก API Key
 api_key = st.text_input("🔑 กรอก Gemini API Key ของคุณที่นี่", type="password", help="วาง API Key ที่ได้มาจาก Google AI Studio ตรงนี้")
@@ -30,7 +33,7 @@ with col2:
     st.subheader("2. ไฟล์ที่ต้องการตรวจ (To Check - PO)")
     file_b = st.file_uploader("เลือกไฟล์ PDF PO", type=["pdf"], key="file_po")
 
-# ฟังก์ชันอัปโหลดไฟล์เข้าสู่ Gemini API พร้อมเช็คสถานะ
+# ฟังก์ชันอัปโหลดไฟล์เข้าสู่ Gemini API
 def upload_to_gemini(client, uploaded_file):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(uploaded_file.getvalue())
@@ -44,10 +47,58 @@ def upload_to_gemini(client, uploaded_file):
     os.unlink(tmp_path)
     return g_file
 
+# ฟังก์ชันใช้ PyMuPDF ขีดฆ่าข้อความที่ผิดและแปะโน้ตข้อความที่ถูกต้องลงใน PDF
+def annotate_pdf_corrections(input_pdf_bytes, corrections):
+    doc = fitz.open(stream=input_pdf_bytes, filetype="pdf")
+    
+    for page in doc:
+        for item in corrections:
+            wrong_text = item.get("wrong", "").strip()
+            correct_text = item.get("correct", "").strip()
+            
+            if not wrong_text:
+                continue
+                
+            # ค้นหาตำแหน่งของข้อความที่ผิดในหน้ากระดาษ
+            text_instances = page.search_for(wrong_text)
+            for inst in text_instances:
+                # 1. วาดเส้นขีดฆ่าสีแดงทับข้อความที่ผิด
+                strike = page.add_strikeout_annot(inst)
+                strike.set_colors(stroke=(1, 0, 0)) # สีแดง
+                strike.update()
+                
+                # 2. สร้างกล่องโน้ตข้อความ (FreeText Annotation) สีเหลืองแสดงคำที่ถูกต้องไว้ใกล้ๆ
+                note_rect = fitz.Rect(inst.x0, inst.y1 + 3, inst.x0 + 250, inst.y1 + 25)
+                freetext = page.add_freetext_annot(
+                    note_rect, 
+                    f"-> แก้ไขเป็น: {correct_text}", 
+                    fontsize=9, 
+                    text_color=(1, 0, 0), # ตัวหนังสือสีแดง
+                    fill=(1, 1, 0.8)      # พื้นหลังสีเหลืองอ่อนสไตล์กระดาษโน้ต
+                )
+                freetext.update()
+                
+    output_pdf_bytes = doc.write()
+    doc.close()
+    return output_pdf_bytes
+
+# ฟังก์ชันช่วยแกะ JSON รายการที่ต้องแก้ไขจากข้อความที่ AI ตอบกลับ
+def extract_json_corrections(text):
+    try:
+        match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
+        if match:
+            return json.loads(match.group(1))
+        match_brackets = re.search(r'\[\s*\{.*?\}\s*\]', text, re.DOTALL)
+        if match_brackets:
+            return json.loads(match_brackets.group(0))
+    except:
+        pass
+    return []
+
 st.divider()
 
 # ปุ่มเริ่มทำงาน
-if st.button("🚀 เริ่มตรวจสอบและออกรายงาน", type="primary", use_container_width=True):
+if st.button("🚀 เริ่มตรวจสอบและสร้างไฟล์ PDF แก้ไข", type="primary", use_container_width=True):
     if not api_key:
         st.error("❌ กรุณากรอก Gemini API Key ในช่องด้านบนก่อนครับ")
     elif not file_a or not file_b:
@@ -66,35 +117,27 @@ if st.button("🚀 เริ่มตรวจสอบและออกรา�
             g_b = upload_to_gemini(client, file_b)
             uploaded_files.append(g_b.name)
             
-            status_box.write("🤖 AI กำลังวิเคราะห์และตรวจสอบเอกสาร...")
+            status_box.write("🤖 AI กำลังวิเคราะห์เปรียบเทียบจุดที่ต้องแก้ไข...")
             
-            # Master Prompt ฉบับสมบูรณ์
+            # Master Prompt ที่สั่งให้ AI ออกตารางรายงานและสรุปข้อมูล JSON สำหรับทำ Annotations
             prompt = """
-            จงเปรียบเทียบเอกสาร B (ไฟล์ตรวจสอบ PO) กับ เอกสาร A (ไฟล์ตั้งต้น Quotation) อย่างละเอียดที่สุด โดยเจาะจงตรวจสอบ 3 ส่วนหลัก:
-            1. Description (รายละเอียด/คำอธิบายสินค้า): ต้องตรงกันแบบคำต่อคำ (Exact Match)
-            2. จำนวนสินค้า (Quantity / Qty): ตัวเลขจำนวนต้องตรงกัน
-            3. ราคา (Price / Unit Price / Total Price): ตัวเลขราคาต้องตรงกัน
+            จงเปรียบเทียบเอกสาร B (ไฟล์ตรวจสอบ PO) กับ เอกสาร A (ไฟล์ตั้งต้น Quotation) อย่างละเอียด โดยเจาะจงตรวจสอบ Description, ราคา และจำนวน
 
             เงื่อนไขการคัดกรองหน้า:
-            - ให้สแกนและรายงานเฉพาะหน้าที่มีรายการสินค้า/Description, ราคา หรือจำนวน ในไฟล์ B เท่านั้น (มองข้ามหน้าเงื่อนไขสัญญา หน้าปก หรือหน้าข้อกำหนดอื่นๆ ที่ไม่เกี่ยวข้อง)
+            - สแกนและรายงานเฉพาะหน้าที่มีรายการสินค้า/Description, ราคา หรือจำนวน ในไฟล์ B เท่านั้น
 
-            โครงสร้างและรูปแบบการรายงานผลที่ต้องแสดงผล (ต้องตามรูปแบบนี้ทุกประการ):
-
-            ### ตารางเปรียบเทียบและผลการตรวจสอบ
-            ให้แสดงผลเป็นตาราง Markdown ที่มี 4 คอลัมน์หลัก ดังนี้:
-            1. รายการ / รหัสสินค้า (ไฟล์ B): ระบุหน้า, ประเภทเอกสาร (เช่น PO, Quotation), Item No., และรหัสสินค้า
-            2. รายละเอียดใน เอกสาร A (ไฟล์ตั้งต้น): ระบุ Description เต็มๆ พร้อมระบุ Qty, Unit Price, และ Amount ให้ครบถ้วน
-            3. รายละเอียดใน เอกสาร B (ไฟล์ตรวจสอบ): ระบุรายละเอียดที่ปรากฏจริงในไฟล์ B พร้อมรูปแบบการจัดหน้า/แยกบรรทัด, Qty, Unit Price, และ Amount
-            4. ผลการตรวจสอบ / สิ่งที่ต้องแก้ไข: ระบุจุดที่แตกต่างอย่างละเอียด (เช่น สเปกที่ขาดหายไป, รหัสรุ่นที่ถูกตัดทอน, การขีดฆ่า, หน่วยนับที่ต่างกัน เช่น SET กับ pcs) พร้อมบอกชัดเจนว่าต้องเติมหรือแก้ไขอย่างไร
-
-            ### สรุปภาพรวม
-            (ให้วางหัวข้อนี้ไว้ใต้ตาราง โดยแบ่งเป็น 3 ประเด็นหลักดังนี้):
-            1. ด้านราคา (Price): สรุปความถูกต้องของราคาต่อหน่วยและราคารวมทั้งหมด
-            2. ด้านจำนวน (Quantity): สรุปความถูกต้องของปริมาณ และรูปแบบการนับหน่วย
-            3. ด้านรายละเอียด (Description): สรุปภาพรวมแยกตามประเภทเอกสารในไฟล์ B ว่ามีจุดผิดเพี้ยนหลักอะไรบ้าง และข้อเสนอแนะในการแก้ไข
-
-            ข้อห้ามสำคัญ:
-            - ห้ามใช้แท็ก HTML เช่น <br> ในตารางหรือข้อความเด็ดขาด หากต้องการขึ้นบรรทัดใหม่ให้ใช้การเว้นบรรทัดปกติหรือใช้สัญลักษณ์ Bullet (•) เพื่อความสะอาดตา
+            รูปแบบการรายงานผล:
+            1. แสดงตาราง Markdown 4 คอลัมน์ (รายการ/รหัสสินค้า, รายละเอียดใน A, รายละเอียดใน B, ผลการตรวจสอบ/สิ่งที่ต้องแก้ไข)
+            2. ส่วนสรุปภาพรวมด้านล่าง (ราคา, จำนวน, รายละเอียด)
+            
+            คำสั่งพิเศษสำหรับระบบอัดโน้ต PDF:
+            ที่บรรทัดสุดท้ายสุดของข้อความ ให้ใส่บล็อกโค้ด JSON ของรายการที่ต้องแก้ไขในรูปแบบนี้เท่านั้น เพื่อให้โปรแกรมนำไปขีดฆ่าและแปะโน้ตใน PDF:
+            ```json
+            [
+              {"wrong": "ข้อความผิดหรือข้อความเดิมที่ปรากฏในไฟล์ B จริงๆ", "correct": "ข้อความที่ถูกต้องจากไฟล์ A ที่ต้องแก้ไขใส่แทน"}
+            ]
+            ```
+            ห้ามใช้แท็ก HTML เช่น <br> เด็ดขาด
             """
             
             # ระบบลองส่งซ้ำอัตโนมัติ (Auto-Retry) เมื่อเจอ 503 High Demand
@@ -123,29 +166,46 @@ if st.button("🚀 เริ่มตรวจสอบและออกรา�
             if not success or not response:
                 raise Exception("เซิร์ฟเวอร์หนาแน่นเกินไป โปรดลองกดปุ่มเริ่มตรวจสอบใหม่อีกครั้ง")
             
-            # ดักลบแท็ก <br> ทิ้งทั้งหมดเพื่อความสะอาดตา
             clean_output = response.text.replace("<br>", " ").replace("<br/>", " ").replace("<BR>", " ")
             
-            status_box.update(label="✅ ตรวจสอบและออกรายงานเสร็จสิ้น!", state="complete", expanded=False)
+            status_box.update(label="✅ ตรวจสอบและสร้างไฟล์โน้ตเสร็จสิ้น!", state="complete", expanded=False)
             
-            # แสดงผลรายงานบนหน้าเว็บ
+            # แสดงผลรายงานตารางบนหน้าเว็บ
             st.markdown(clean_output)
             
-            # ปุ่มดาวน์โหลดรายงานผล
+            # ดึงข้อมูล JSON รายการที่ต้องแก้เพื่อนำมาวาดโน้ตลง PDF
+            corrections_list = extract_json_corrections(response.text)
+            
+            status_box.write("⚙️ กำลังวาดเส้นขีดฆ่าและแปะโน้ตคำที่ถูกต้องลงในไฟล์ PDF...")
+            file_b.seek(0)
+            pdf_bytes = file_b.read()
+            
+            # ทำการ Annotate ขีดฆ่าและใส่โน้ตลงใน PDF
+            annotated_pdf_bytes = annotate_pdf_corrections(pdf_bytes, corrections_list)
+            
+            # ส่วนปุ่มดาวน์โหลด
             st.divider()
-            st.download_button(
-                label="📥 ดาวน์โหลดรายงานผลเป็นไฟล์ข้อความ (.txt)",
-                data=clean_output,
-                file_name="po_audit_report.txt",
-                mime="text/plain"
-            )
+            col_dl1, col_dl2 = st.columns(2)
+            with col_dl1:
+                st.download_button(
+                    label="📥 ดาวน์โหลดรายงานผล (.txt)",
+                    data=clean_output,
+                    file_name="po_audit_report.txt",
+                    mime="text/plain"
+                )
+            with col_dl2:
+                st.download_button(
+                    label="📥 ดาวน์โหลดไฟล์ PDF ที่ขีดฆ่าและแปะโน้ตแล้ว (.pdf)",
+                    data=annotated_pdf_bytes,
+                    file_name="annotated_po_document.pdf",
+                    mime="application/pdf"
+                )
 
         except Exception as e:
             status_box.update(label="❌ เกิดข้อผิดพลาดในการประมวลผล", state="error", expanded=True)
             st.error(f"รายละเอียด: {str(e)}")
             
         finally:
-            # ลบไฟล์ออกจากเซิร์ฟเวอร์ Gemini ทันทีหลังทำงานเสร็จ
             if uploaded_files and 'client' in locals():
                 for name in uploaded_files:
                     try:

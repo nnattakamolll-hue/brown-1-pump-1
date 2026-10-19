@@ -15,7 +15,7 @@ st.set_page_config(
 )
 
 st.title("📄 ระบบตรวจสอบและทำโน้ตแก้ไขไฟล์ PO กับ Quotation ด้วย AI")
-st.caption("เปรียบเทียบไฟล์ Quotation (File A) กับ PO (File B) พร้อมสร้างตารางรายงานสรุป และวาดรอยขีดฆ่าพร้อม Pop-up Note ลงในไฟล์ PDF")
+st.caption("เปรียบเทียบไฟล์ Quotation (File A) กับ PO (File B) พร้อมขีดค่าและแปะกล่องข้อความสีแดงลงในไฟล์ PDF")
 
 api_key = st.text_input("🔑 กรอก Gemini API Key ของคุณที่นี่", type="password", help="วาง API Key ที่ได้มาจาก Google AI Studio ตรงนี้")
 
@@ -43,10 +43,49 @@ def upload_to_gemini(client, uploaded_file):
     os.unlink(tmp_path)
     return g_file
 
+def draw_custom_red_annotation(page, inst, correct_text, index):
+    """
+    ฟังก์ชันสำหรับวาดเส้นขีดฆ่าสีแดง + วาดเส้นชี้ + สร้างกล่องข้อความสีแดงตามสไตล์ตัวอย่าง
+    """
+    # 1. วาดเส้นขีดฆ่าสีแดงทับคำผิด
+    strike = page.add_strikeout_annot(inst)
+    strike.set_colors(stroke=(1, 0, 0))  # สีแดงสด (RGB: 1, 0, 0)
+    strike.update()
+
+    # 2. คำนวณตำแหน่งกล่องข้อความให้อยู่ด้านล่างขวาของจุดที่ผิด
+    box_x0 = inst.x1 + 30
+    box_y0 = inst.y1 + 15 + (index * 25) # ขยับตำแหน่งลงมาหากมีหลายจุดใกล้กัน
+    box_w = max(len(correct_text) * 7, 140)
+    box_h = 20
+    
+    rect = fitz.Rect(box_x0, box_y0, box_x0 + box_w, box_y0 + box_h)
+    
+    # 3. วาดเส้นลูกศร/เส้นชี้จากข้อความที่ขีดฆ่าไปยังกล่องข้อความ
+    line = page.add_line_annot(fitz.Point(inst.x1, inst.y1), fitz.Point(box_x0, box_y0 + (box_h / 2)))
+    line.set_colors(stroke=(1, 0, 0))
+    line.update()
+
+    # 4. วาดกล่องสี่เหลี่ยมขอบสีแดง พื้นหลังสีขาว
+    rect_annot = page.add_rect_annot(rect)
+    rect_annot.set_colors(stroke=(1, 0, 0), fill=(1, 1, 1))
+    rect_annot.set_border(width=1.5)
+    rect_annot.update()
+
+    # 5. ใส่ตัวหนังสือสีแดงลงในกล่องข้อความ
+    page.insert_text(
+        fitz.Point(box_x0 + 5, box_y0 + 14),
+        correct_text,
+        fontsize=9,
+        color=(1, 0, 0),
+        fontname="helv"
+    )
+
 def annotate_pdf_corrections(input_pdf_bytes, corrections):
     doc = fitz.open(stream=input_pdf_bytes, filetype="pdf")
+    total_annots = 0
     
     for page in doc:
+        page_annot_idx = 0
         for item in corrections:
             wrong_text = item.get("wrong", "").strip()
             correct_text = item.get("correct", "").strip()
@@ -54,24 +93,23 @@ def annotate_pdf_corrections(input_pdf_bytes, corrections):
             if not wrong_text or len(wrong_text) < 2:
                 continue
                 
-            # ค้นหาพิกัดข้อความผิดในหน้า PDF (แก้ไขลบ hit_max ออกเรียบร้อย)
+            # ค้นหาตำแหน่งข้อความเดิมในหน้า PDF
             text_instances = page.search_for(wrong_text)
             
+            # หากประโยคยาวไป ให้ลองค้นด้วยรหัสคำแรก
+            if not text_instances and " " in wrong_text:
+                first_word = wrong_text.split()[0]
+                if len(first_word) >= 3:
+                    text_instances = page.search_for(first_word)
+            
             for inst in text_instances:
-                # 1. วาดเส้นขีดฆ่าสีแดงทับข้อความเดิม
-                strike = page.add_strikeout_annot(inst)
-                strike.set_colors(stroke=(1, 0, 0))
-                strike.update()
-                
-                # 2. สร้าง Pop-up Note สีเหลืองเพื่อระบุคำที่ถูกต้อง
-                note_pos = fitz.Point(inst.x1 + 2, inst.y0)
-                annot = page.add_text_annot(note_pos, f"แก้ไขเป็น: {correct_text}")
-                annot.set_colors(stroke=(1, 0.8, 0))
-                annot.update()
+                draw_custom_red_annotation(page, inst, correct_text, page_annot_idx)
+                page_annot_idx += 1
+                total_annots += 1
 
-    output_pdf_bytes = doc.write()
+    output_pdf_bytes = doc.write(clean=True, deflate=True)
     doc.close()
-    return output_pdf_bytes
+    return output_pdf_bytes, total_annots
 
 def extract_json_corrections(text):
     try:
@@ -114,29 +152,21 @@ if st.button("🚀 เริ่มตรวจสอบและสร้าง�
             2. จำนวนสินค้า (Quantity / Qty): ตัวเลขจำนวนต้องตรงกัน
             3. ราคา (Price / Unit Price / Total Price): ตัวเลขราคาต้องตรงกัน
 
-            เงื่อนไขการคัดกรองหน้า (Filter Relevant Pages):
-            - ให้สแกนและรายงานเฉพาะหน้าที่มีรายการสินค้า/Description, ราคา หรือจำนวน ในไฟล์ B เท่านั้น (มองข้ามหน้าเงื่อนไขสัญญา หน้าปก หรือเอกสารแนบทั่วไปที่ไม่เกี่ยวข้อง)
+            เงื่อนไขการคัดกรองหน้า:
+            - ให้สแกนและรายงานเฉพาะหน้าที่มีรายการสินค้า/Description, ราคา หรือจำนวน ในไฟล์ B เท่านั้น
 
-            โครงสร้างและรูปแบบการรายงานผลที่ต้องแสดงผล (ตามรูปแบบมาตรฐาน):
-
+            โครงสร้างและรูปแบบการรายงานผลที่ต้องแสดงผล:
             ### ตารางเปรียบเทียบและผลการตรวจสอบ
-            ให้แสดงผลเป็นตาราง Markdown ที่มี 4 คอลัมน์หลัก ดังนี้:
-            1. รายการ / รหัสสินค้า (ไฟล์ B): ระบุหน้า, ประเภทเอกสาร (เช่น PO, Quotation), Item No., และรหัสสินค้า
-            2. รายละเอียดใน เอกสาร A (ไฟล์ตั้งต้น): ระบุ Description เต็มๆ พร้อมระบุ Qty, Unit Price, และ Amount ให้ครบถ้วน
-            3. รายละเอียดใน เอกสาร B (ไฟล์ตรวจสอบ): ระบุรายละเอียดที่ปรากฏจริงในไฟล์ B พร้อมรูปแบบการจัดหน้า/แยกบรรทัด, Qty, Unit Price, และ Amount
-            4. ผลการตรวจสอบ / สิ่งที่ต้องแก้ไข: ระบุจุดที่แตกต่างอย่างละเอียด (เช่น สเปกที่ขาดหายไป, รหัสรุ่นที่ถูกตัดทอน, การขีดฆ่า, หน่วยนับที่ต่างกัน เช่น SET กับ pcs) พร้อมบอกชัดเจนว่าต้องเติมหรือแก้ไขอย่างไร (สรุปเป็น Bullet Point •)
+            ให้แสดงผลเป็นตาราง Markdown 4 คอลัมน์หลัก (รายการ/รหัสสินค้า, รายละเอียดใน A, รายละเอียดใน B, ผลการตรวจสอบ/สิ่งที่ต้องแก้ไข)
 
             ### สรุปภาพรวม
-            (วางหัวข้อนี้ไว้ใต้ตาราง โดยแบ่งเป็น 3 ประเด็นหลัก):
-            1. ด้านราคา (Price): สรุปความถูกต้องของราคาต่อหน่วยและราคารวมทั้งหมด
-            2. ด้านจำนวน (Quantity): สรุปความถูกต้องของปริมาณ และรูปแบบการนับหน่วย
-            3. ด้านรายละเอียด (Description): สรุปภาพรวมแยกตามประเภทเอกสารในไฟล์ B ว่ามีจุดผิดเพี้ยนหลักอะไรบ้าง และข้อเสนอแนะในการแก้ไข
+            สรุป 3 ด้านหลัก (ราคา, จำนวน, รายละเอียด)
 
-            คำสั่งพิเศษสำหรับระบบทำโน้ตลง PDF:
-            ที่บรรทัดท้ายสุดของข้อความ ให้ใส่บล็อกโค้ด JSON ของรายการที่ต้องแก้ไขในรูปแบบนี้ เพื่อนำไปขีดฆ่าและแปะโน้ตลงบนไฟล์ PDF:
+            คำสั่งสำคัญสำหรับการสร้างพิกัดขีดฆ่าและใส่ข้อความแก้ไข:
+            ที่บรรทัดท้ายสุด ให้ระบุรายการข้อความที่ผิดในรูปแบบ JSON โดยค่า "wrong" ต้องเป็น "รหัสสินค้าหรือคำสั้นๆ ที่ผิดในไฟล์ B" เท่านั้น เพื่อให้ระบบค้นหาตำแหน่งเจอ:
             ```json
             [
-              {"wrong": "ข้อความผิดหรือข้อความเดิมที่ปรากฏจริงในไฟล์ B", "correct": "ข้อความที่ถูกต้องจากไฟล์ A"}
+              {"wrong": "ข้อความ/รหัสเดิมที่ผิดในไฟล์ B", "correct": "ข้อความ/รหัสที่ถูกต้องจากไฟล์ A"}
             ]
             ```
 
@@ -171,14 +201,14 @@ if st.button("🚀 เริ่มตรวจสอบและสร้าง�
             
             clean_output = response.text.replace("<br>", " ").replace("<br/>", " ").replace("<BR>", " ")
             
-            status_box.write("⚙️ กำลังวาดเส้นขีดฆ่าและแปะ Pop-up Note ลงในไฟล์ PDF...")
+            status_box.write("⚙️ กำลังวาดเส้นขีดฆ่าและกล่องข้อความแก้ไขสีแดงลงในไฟล์ PDF...")
             
             corrections_list = extract_json_corrections(response.text)
             file_b.seek(0)
             pdf_bytes = file_b.read()
-            annotated_pdf_bytes = annotate_pdf_corrections(pdf_bytes, corrections_list)
+            annotated_pdf_bytes, total_annots = annotate_pdf_corrections(pdf_bytes, corrections_list)
             
-            status_box.update(label="✅ ตรวจสอบและสร้างไฟล์โน้ตเสร็จสิ้น!", state="complete", expanded=False)
+            status_box.update(label=f"✅ ตรวจสอบเสร็จสิ้น! (ทำการขีดฆ่าและแปะกล่องข้อความไปทั้งหมด {total_annots} จุด)", state="complete", expanded=False)
             
             st.markdown(clean_output)
             
@@ -193,7 +223,7 @@ if st.button("🚀 เริ่มตรวจสอบและสร้าง�
                 )
             with col_dl2:
                 st.download_button(
-                    label="📥 ดาวน์โหลดไฟล์ PDF ที่ขีดฆ่าและแปะโน้ตแล้ว (.pdf)",
+                    label=f"📥 ดาวน์โหลดไฟล์ PDF ฉบับขีดฆ่าและแก้คำแล้ว ({total_annots} จุด) (.pdf)",
                     data=annotated_pdf_bytes,
                     file_name="annotated_po_document.pdf",
                     mime="application/pdf"

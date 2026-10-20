@@ -15,7 +15,7 @@ st.set_page_config(
 )
 
 st.title("📄 ระบบตรวจสอบและแก้ไขข้อความบนไฟล์ PDF (PO) อัตโนมัติ")
-st.caption("เปรียบเทียบไฟล์ Quotation (File A) กับ PO (File B) แบบละเอียดทุกหน้า พร้อมขีดฆ่าและแปะคำที่ถูกต้องลงไฟล์ PDF")
+st.caption("เปรียบเทียบไฟล์ Quotation (File A) กับ PO (File B) แบบละเอียดทุกหน้า พร้อมขีดฆ่าและแปะคำที่ถูกต้องลงไฟล์ PDF จริง")
 
 api_key = st.text_input("🔑 กรอก Gemini API Key ของคุณที่นี่", type="password", help="วาง API Key ที่ได้มาจาก Google AI Studio ตรงนี้")
 
@@ -44,9 +44,6 @@ def upload_to_gemini(client, uploaded_file):
     return g_file
 
 def draw_red_corrections_permanently(page, inst, correct_text, index):
-    """
-    วาดเส้นขีดฆ่าสีแดง ลากเส้นชี้ และสร้างกล่องข้อความสีแดงฝังลงในเนื้อ PDF จริง
-    """
     y_center = (inst.y0 + inst.y1) / 2
     
     # 1. วาดเส้นขีดฆ่าสีแดงทับคำผิด
@@ -103,17 +100,16 @@ def annotate_pdf_corrections(input_pdf_bytes, corrections):
             if not wrong_text or len(wrong_text) < 2:
                 continue
                 
-            # ค้นหาข้อความแบบยืดหยุ่น
+            # ค้นหาข้อความแบบยืดหยุ่น (Exact Match ก่อน)
             text_instances = page.search_for(wrong_text)
             
-            # หากหาประโยคยาวไม่เจอ ให้ลองตัดค้นเฉพาะรหัสหลัก หรือส่วนคำสั้นๆ
-            if not text_instances and (" " in wrong_text or "-" in wrong_text or "/" in wrong_text):
-                parts = re.split(r'[\s\-\/]+', wrong_text)
-                for part in parts:
-                    if len(part) >= 3 and not part.isdigit():
-                        text_instances = page.search_for(part)
+            # ถ้ายูสเซอร์หรือ AI ส่งข้อความยาว ให้แยก Token ค้นหาเฉพาะรหัส/ตัวเลขสำคัญ
+            if not text_instances:
+                tokens = re.findall(r'[A-Za-z0-9\-]+', wrong_text)
+                for token in tokens:
+                    if len(token) >= 4:  # เช่น รหัสสินค้าที่มีความยาวพอสมควร
+                        text_instances = page.search_for(token)
                         if text_instances:
-                            wrong_text = part  # ปรับคำที่เจอจริง
                             break
             
             for inst in text_instances:
@@ -129,17 +125,42 @@ def annotate_pdf_corrections(input_pdf_bytes, corrections):
     doc.close()
     return output_pdf_bytes, applied_logs
 
-def extract_json_corrections(text):
+def extract_corrections_robust(text):
+    """
+    ระบบดึงรายการแก้ไขแบบ 2 ชั้น (JSON + Markdown Table Fallback)
+    """
+    corrections = []
+    
+    # ชั้นที่ 1: ดึงจาก Block JSON
     try:
         match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
         if match:
-            return json.loads(match.group(1))
+            corrections = json.loads(match.group(1))
+            if corrections:
+                return corrections
         match_brackets = re.search(r'\[\s*\{.*?\}\s*\]', text, re.DOTALL)
         if match_brackets:
-            return json.loads(match_brackets.group(0))
+            corrections = json.loads(match_brackets.group(0))
+            if corrections:
+                return corrections
     except:
         pass
-    return []
+        
+    # ชั้นที่ 2: Fallback แกะจากตาราง Markdown อัตโนมัติทันที
+    lines = text.split('\n')
+    for line in lines:
+        if '|' in line and '---' not in line:
+            cols = [c.strip() for c in line.split('|') if c.strip()]
+            if len(cols) >= 4:
+                wrong_candidate = cols[2]  # คอลัมน์รายละเอียดไฟล์ B
+                correct_candidate = cols[1] # คอลัมน์รายละเอียดไฟล์ A
+                if wrong_candidate and correct_candidate and "รายละเอียด" not in wrong_candidate:
+                    corrections.append({
+                        "wrong": wrong_candidate[:30],
+                        "correct": correct_candidate[:30]
+                    })
+                    
+    return corrections
 
 st.divider()
 
@@ -165,37 +186,29 @@ if st.button("🚀 เริ่มตรวจสอบและแก้ไข�
             status_box.write("🤖 AI กำลังสแกนเปรียบเทียบทุกหน้าในเอกสารอย่างละเอียด...")
             
             prompt = """
-            จงตรวจสอบและเปรียบเทียบเอกสาร B (ไฟล์ตรวจสอบ PO) กับ เอกสาร A (ไฟล์ตั้งต้น Quotation) อย่างละเอียดที่สุดแบบ 'ทุกหน้า (Page by Page)' 
-            โดยเจาะจงตรวจสอบ 3 ส่วนสำคัญ:
-            1. Description (รายละเอียด/คำอธิบายสินค้า/สเปก/รหัสรุ่น): ตรวจสอบทุกหน้า ห้ามข้ามคำใดคำหนึ่ง ต้องตรงกันแบบ Exact Match
-            2. จำนวนสินค้า (Quantity / Qty / Unit): ตัวเลขจำนวนและหน่วยนับต้องตรงกัน
-            3. ราคา (Unit Price / Total Price / Amount): ตัวเลขราคาและราคารวมทุกรายการในทุกหน้าต้องตรงกัน
-
-            ข้อกำหนดในการคัดกรองหน้า:
-            - ตรวจสอบรายการสินค้าในทุกๆ หน้าของเอกสาร B หากหน้าไหนไม่มีรายการสินค้า (เช่น หน้าสัญญา/ข้อกำหนดทั่วไป) ให้ระบุสั้นๆ ว่าไม่มีรายการ แต่ต้องสแกนให้ครบทุกหน้า
+            จงตรวจสอบและเปรียบเทียบเอกสาร B (ไฟล์ตรวจสอบ PO) กับ เอกสาร A (ไฟล์ตั้งต้น Quotation) อย่างละเอียดทุกหน้า โดยเจาะจงตรวจสอบ:
+            1. Description (รายละเอียดสินค้า/รหัสรุ่น): ต้องตรงกันแบบคำต่อคำ
+            2. จำนวนสินค้า (Quantity / Qty): ตัวเลขจำนวนต้องตรงกัน
+            3. ราคา (Unit Price / Total Price): ตัวเลขราคาต้องตรงกัน
 
             รูปแบบรายงานสรุป:
             ### ตารางเปรียบเทียบและผลการตรวจสอบ
             ให้แสดงผลเป็นตาราง Markdown 4 คอลัมน์หลัก:
-            1. รายการ / รหัสสินค้า (ไฟล์ B) (ระบุเลขหน้า และ Item No.)
+            1. รายการ / รหัสสินค้า (ไฟล์ B) (ระบุหน้า และ Item No.)
             2. รายละเอียดใน เอกสาร A (ไฟล์ตั้งต้น)
             3. รายละเอียดใน เอกสาร B (ไฟล์ตรวจสอบ)
-            4. ผลการตรวจสอบ / สิ่งที่ต้องแก้ไข (ระบุจุดผิดและคำที่ถูกต้องอย่างชัดเจน)
+            4. ผลการตรวจสอบ / สิ่งที่ต้องแก้ไข
 
             ### สรุปภาพรวม
             สรุป 3 ด้านหลัก (ราคา, จำนวน, รายละเอียด)
 
-            คำสั่งสำคัญมากๆ สำหรับระบบดึงพิกัดขีดฆ่าลงไฟล์ PDF:
-            ที่บรรทัดท้ายสุดของคำตอบ ให้ส่งโครงสร้าง JSON สรุปรายการคำผิดทั้งหมดที่พบในไฟล์ B
-            โดยค่า "wrong" ต้องเป็นคำเดี่ยว, รหัสสินค้า, ตัวเลขราคา หรือข้อความสั้นๆ ที่ปรากฏอยู่จริงในไฟล์ B เท่านั้น (ห้ามใส่ประโยคยาว เพื่อให้ระบบสแกนพบพิกัด X, Y บน PDF):
+            ที่บรรทัดท้ายสุด ส่ง JSON สรุปรายการคำผิดในไฟล์ B:
             ```json
             [
-              {"wrong": "คำหรือรหัสที่ผิดสั้นๆ ในไฟล์ B", "correct": "คำหรือรหัสที่ถูกต้องจากไฟล์ A"}
+              {"wrong": "รหัสหรือคำผิดในไฟล์ B", "correct": "ข้อความที่ถูกต้องจากไฟล์ A"}
             ]
             ```
-
-            ข้อห้ามสำคัญ:
-            - ห้ามใช้แท็ก HTML เช่น <br> ในตารางหรือข้อความเด็ดขาด
+            ห้ามใช้แท็ก HTML เช่น <br>
             """
             
             max_retries = 5
@@ -205,7 +218,7 @@ if st.button("🚀 เริ่มตรวจสอบและแก้ไข�
             
             for attempt in range(max_retries):
                 try:
-                    status_box.write(f"🔄 กำลังวิเคราะห์ข้อมูลทุกหน้า (พยายามครั้งที่ {attempt+1}/{max_retries})...")
+                    status_box.write(f"🔄 กำลังวิเคราะห์ข้อมูล (พยายามครั้งที่ {attempt+1}/{max_retries})...")
                     response = client.models.generate_content(
                         model='gemini-3.8-flash',
                         contents=[g_a, g_b, prompt]
@@ -225,22 +238,22 @@ if st.button("🚀 เริ่มตรวจสอบและแก้ไข�
             
             clean_output = response.text.replace("<br>", " ").replace("<br/>", " ").replace("<BR>", " ")
             
-            status_box.write("⚙️ กำลังขีดฆ่าและฝังกล่องข้อความแก้ไขสีแดงลงในไฟล์ PDF...")
+            status_box.write("⚙️ กำลังดึงรายการและวาดเส้นแก้ไขลงบนไฟล์ PDF...")
             
-            corrections_list = extract_json_corrections(response.text)
+            corrections_list = extract_corrections_robust(response.text)
+            
             file_b.seek(0)
             pdf_bytes = file_b.read()
             annotated_pdf_bytes, applied_logs = annotate_pdf_corrections(pdf_bytes, corrections_list)
             
-            status_box.update(label=f"✅ ตรวจสอบและแก้ไขเรียบร้อย! (สแกนพบและวาดลง PDF ไปทั้งหมด {len(applied_logs)} จุด)", state="complete", expanded=False)
+            status_box.update(label=f"✅ ตรวจสอบและแก้ไขเรียบร้อย! (วาดลง PDF ไปทั้งหมด {len(applied_logs)} จุด)", state="complete", expanded=False)
             
             st.markdown(clean_output)
             
-            # ส่วนแสดง Logs จุดที่ทำการวาดขีดฆ่าจริงบน PDF
-            if applied_logs:
-                st.divider()
-                st.subheader("📍 รายการจุดที่ทำการขีดฆ่าและแปะข้อความลงในไฟล์ PDF")
-                st.dataframe(applied_logs, use_container_width=True)
+            # เปิดให้ดูรายการพิกัดที่ระบบนำไปแก้ไข
+            with st.expander("🔍 ตรวจสอบรายการพิกัดที่ระบบนำไปแก้ไขบน PDF"):
+                st.write("**รายการ Corrections ที่แกะได้:**", corrections_list)
+                st.write("**รายการที่ค้นหาพบและวาดลง PDF สำเร็จ (Logs):**", applied_logs)
             
             st.divider()
             col_dl1, col_dl2 = st.columns(2)

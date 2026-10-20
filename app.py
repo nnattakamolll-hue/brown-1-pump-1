@@ -6,9 +6,8 @@ import os
 import time
 import json
 import re
-import fitz  # PyMuPDF สำหรับวาด Annotations บน PDF
+import fitz  # PyMuPDF
 
-# ตั้งค่าหน้าเว็บ
 st.set_page_config(
     page_title="PDF PO & Quotation Auditor", 
     page_icon="📄", 
@@ -16,7 +15,7 @@ st.set_page_config(
 )
 
 st.title("📄 ระบบตรวจสอบและแก้ไขข้อความบนไฟล์ PDF (PO) อัตโนมัติ")
-st.caption("เปรียบเทียบไฟล์ Quotation (File A) กับ PO (File B) แล้วนำจุดที่ผิดไปขีดฆ่าพร้อมลากเส้นแปะข้อความที่ถูกต้องลงในไฟล์ PDF")
+st.caption("เปรียบเทียบไฟล์ Quotation (File A) กับ PO (File B) แล้วฝังเส้นขีดฆ่าสีแดงพร้อมข้อความที่ถูกต้องลงในไฟล์ PDF จริง")
 
 api_key = st.text_input("🔑 กรอก Gemini API Key ของคุณที่นี่", type="password", help="วาง API Key ที่ได้มาจาก Google AI Studio ตรงนี้")
 
@@ -44,47 +43,53 @@ def upload_to_gemini(client, uploaded_file):
     os.unlink(tmp_path)
     return g_file
 
-def draw_red_correction_box(page, inst, correct_text, box_index):
+def draw_red_corrections_permanently(page, inst, correct_text, index):
     """
-    วาดเส้นขีดฆ่าสีแดงทับข้อความที่ผิด ลากเส้นชี้ และแปะกล่องข้อความสีแดงพร้อมข้อความที่ถูกต้อง
+    ฝังเส้นขีดฆ่าสีแดง และพิมพ์ข้อความแก้ไขสีแดงทับลงเนื้อ PDF ถาวร (Burn-in / Flatten)
     """
-    # 1. วาดเส้นขีดฆ่าสีแดงทับคำผิด (Strikeout)
-    strike = page.add_strikeout_annot(inst)
-    strike.set_colors(stroke=(1, 0, 0))  # สีแดงสด
-    strike.update()
-
-    # 2. คำนวณพิกัดกล่องข้อความ (ขยับเยื้องด้านล่างขวาเพื่อไม่ให้ทับซ้อนกัน)
-    box_x0 = inst.x1 + 35
-    box_y0 = inst.y1 + 10 + (box_index * 22)
-    box_w = max(len(correct_text) * 7.5, 130)
-    box_h = 20
+    # 1. วาดเส้นขีดฆ่าสีแดงกลางข้อความผิด
+    y_center = (inst.y0 + inst.y1) / 2
+    page.draw_line(
+        fitz.Point(inst.x0, y_center),
+        fitz.Point(inst.x1, y_center),
+        color=(1, 0, 0),  # สีแดง
+        width=1.5
+    )
+    
+    # 2. คำนวณตำแหน่งกล่องข้อความแก้ไข
+    box_x0 = inst.x1 + 15
+    box_y0 = inst.y1 + (index * 20)
+    box_w = max(len(correct_text) * 7, 120)
+    box_h = 16
     
     rect = fitz.Rect(box_x0, box_y0, box_x0 + box_w, box_y0 + box_h)
     
-    # 3. วาดเส้นชี้สีแดงจากคำผิดไปยังกล่องข้อความ
-    line = page.add_line_annot(fitz.Point(inst.x1, (inst.y0 + inst.y1) / 2), fitz.Point(box_x0, box_y0 + (box_h / 2)))
-    line.set_colors(stroke=(1, 0, 0))
-    line.update()
-
-    # 4. วาดกล่องสี่เหลี่ยมขอบสีแดง พื้นหลังสีขาว
-    rect_annot = page.add_rect_annot(rect)
-    rect_annot.set_colors(stroke=(1, 0, 0), fill=(1, 1, 1))
-    rect_annot.set_border(width=1.5)
-    rect_annot.update()
-
-    # 5. พิมพ์ตัวหนังสือสีแดงแสดงคำที่ถูกต้องลงในกล่อง
+    # 3. วาดเส้นชี้สีแดงจากคำผิดไปยังข้อความแก้
+    page.draw_line(
+        fitz.Point(inst.x1, y_center),
+        fitz.Point(box_x0, box_y0 + (box_h / 2)),
+        color=(1, 0, 0),
+        width=1.0
+    )
+    
+    # 4. วาดกล่องกรอบสีแดง พื้นสีขาว
+    page.draw_rect(
+        rect,
+        color=(1, 0, 0),
+        fill=(1, 1, 1),
+        width=1.0
+    )
+    
+    # 5. พิมพ์ตัวหนังสือสีแดงลงในเนื้อ PDF ถาวร
     page.insert_text(
-        fitz.Point(box_x0 + 6, box_y0 + 14),
+        fitz.Point(box_x0 + 4, box_y0 + 12),
         correct_text,
-        fontsize=9,
+        fontsize=8.5,
         color=(1, 0, 0),
         fontname="helv"
     )
 
 def annotate_pdf_corrections(input_pdf_bytes, corrections):
-    """
-    ค้นหาพิกัดคำผิดใน PDF และเรียกใช้วิธีการวาดอย่างเสถียร
-    """
     doc = fitz.open(stream=input_pdf_bytes, filetype="pdf")
     total_matches = 0
     
@@ -97,10 +102,10 @@ def annotate_pdf_corrections(input_pdf_bytes, corrections):
             if not wrong_text or len(wrong_text) < 2:
                 continue
                 
-            # ค้นหาพิกัดคำผิดแบบ Exact Match
+            # ค้นหาพิกัดคำผิดใน PDF
             text_instances = page.search_for(wrong_text)
             
-            # หากค้นหาทั้งประโยคไม่เจอ ให้ลองตัดค้นเฉพาะรหัสคำสั้นๆ หรือส่วนตัวเลข
+            # ถ้าหาทั้งคำไม่เจอ ให้ลองหาตัดคำสั้นๆ
             if not text_instances and (" " in wrong_text or "-" in wrong_text):
                 parts = re.split(r'[\s\-]+', wrong_text)
                 for part in parts:
@@ -109,21 +114,18 @@ def annotate_pdf_corrections(input_pdf_bytes, corrections):
                         if text_instances:
                             break
             
-            # วาดเส้นและกล่องลงบนตำแหน่งที่ค้นเจอทั้งหมด
+            # สั่งเขียนเส้นสีแดงฝังลงเนื้อ PDF จริงทันที
             for inst in text_instances:
-                draw_red_correction_box(page, inst, correct_text, box_idx)
+                draw_red_corrections_permanently(page, inst, correct_text, box_idx)
                 box_idx += 1
                 total_matches += 1
 
-    # บันทึกเป็นไฟล์ PDF ใหม่
+    # บันทึกไฟล์ PDF แบบฝังเนื้อหาชัวร์ๆ
     output_pdf_bytes = doc.write(clean=True, deflate=True)
     doc.close()
     return output_pdf_bytes, total_matches
 
 def extract_json_corrections(text):
-    """
-    ถอดรหัสข้อมูล JSON รายการคำผิด-ถูกจากข้อความ AI
-    """
     try:
         match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
         if match:
@@ -137,7 +139,7 @@ def extract_json_corrections(text):
 
 st.divider()
 
-if st.button("🚀 เริ่มตรวจสอบและวาดโน้ตแก้ไขลงไฟล์ PDF", type="primary", use_container_width=True):
+if st.button("🚀 เริ่มตรวจสอบและแก้ไขไฟล์ PDF", type="primary", use_container_width=True):
     if not api_key:
         st.error("❌ กรุณากรอก Gemini API Key ในช่องด้านบนก่อนครับ")
     elif not file_a or not file_b:
@@ -174,11 +176,11 @@ if st.button("🚀 เริ่มตรวจสอบและวาดโน�
             ### สรุปภาพรวม
             สรุป 3 ด้านหลัก (ราคา, จำนวน, รายละเอียด)
 
-            คำสั่งสำคัญในการส่งพิกัดไปวาดเส้นขีดฆ่าบน PDF:
-            ที่บรรทัดท้ายสุดของคำตอบ คุณต้องส่งโครงสร้าง JSON สรุปรายการคำผิดที่พบในไฟล์ B โดยค่า "wrong" ต้องเป็นคำ/รหัส/ตัวเลขสั้นๆ ที่ปรากฏอยู่จริงในไฟล์ B เท่านั้น (เพื่อให้ระบบสแกนค้นหาพิกัด X,Y ได้ 100%):
+            คำสั่งสำคัญในการส่งพิกัดไปเขียนเส้นขีดฆ่าทับ PDF:
+            ที่บรรทัดท้ายสุด ให้ส่ง JSON สรุปคำผิดในไฟล์ B โดยค่า "wrong" ต้องเป็น "คำหรือรหัสที่ผิดสั้นๆ ที่ปรากฏอยู่จริงในไฟล์ B" เท่านั้น:
             ```json
             [
-              {"wrong": "คำหรือรหัสที่ผิดในไฟล์ B", "correct": "คำหรือรหัสที่ถูกต้องจากไฟล์ A"}
+              {"wrong": "คำหรือรหัสเดิมที่ผิดในไฟล์ B", "correct": "ข้อความที่ถูกต้องจากไฟล์ A"}
             ]
             ```
 
@@ -186,7 +188,6 @@ if st.button("🚀 เริ่มตรวจสอบและวาดโน�
             - ห้ามใช้แท็ก HTML เช่น <br> ในตารางหรือข้อความเด็ดขาด
             """
             
-            # ระบบ Auto-Retry
             max_retries = 5
             retry_delay = 5
             response = None
@@ -212,18 +213,16 @@ if st.button("🚀 เริ่มตรวจสอบและวาดโน�
             if not success or not response:
                 raise Exception("เซิร์ฟเวอร์หนาแน่นเกินไป โปรดลองกดปุ่มเริ่มตรวจสอบใหม่อีกครั้ง")
             
-            # ลบแท็ก <br>
             clean_output = response.text.replace("<br>", " ").replace("<br/>", " ").replace("<BR>", " ")
             
-            status_box.write("⚙️ กำลังวาดเส้นขีดฆ่า ลากเส้นชี้ และแปะกล่องข้อความแก้ไขลงบนไฟล์ PDF...")
+            status_box.write("⚙️ กำลังขีดฆ่าและฝังกล่องข้อความแก้ไขสีแดงลงในไฟล์ PDF...")
             
-            # ดึงคำผิดและวาดแก้ไขลงใน PDF
             corrections_list = extract_json_corrections(response.text)
             file_b.seek(0)
             pdf_bytes = file_b.read()
             annotated_pdf_bytes, total_annots = annotate_pdf_corrections(pdf_bytes, corrections_list)
             
-            status_box.update(label=f"✅ ตรวจสอบและแก้ไขเรียบร้อย! (วาดเส้นและกล่องข้อความลงบน PDF ไปทั้งหมด {total_annots} จุด)", state="complete", expanded=False)
+            status_box.update(label=f"✅ ตรวจสอบและแก้ไขเรียบร้อย! (ฝังรอยขีดฆ่าสีแดงลง PDF ไปทั้งหมด {total_annots} จุด)", state="complete", expanded=False)
             
             st.markdown(clean_output)
             
@@ -238,7 +237,7 @@ if st.button("🚀 เริ่มตรวจสอบและวาดโน�
                 )
             with col_dl2:
                 st.download_button(
-                    label=f"📥 ดาวน์โหลดไฟล์ PDF ที่ขีดฆ่าและแปะคำถูกต้องแล้ว ({total_annots} จุด) (.pdf)",
+                    label=f"📥 ดาวน์โหลดไฟล์ PDF ที่แก้ไขแล้วจริง ({total_annots} จุด) (.pdf)",
                     data=annotated_pdf_bytes,
                     file_name="annotated_po_document.pdf",
                     mime="application/pdf"

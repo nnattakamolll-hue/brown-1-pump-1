@@ -15,7 +15,7 @@ st.set_page_config(
 )
 
 st.title("📄 ระบบตรวจสอบและแก้ไขข้อความบนไฟล์ PDF (PO) อัตโนมัติ")
-st.caption("เปรียบเทียบไฟล์ Quotation (File A) กับ PO (File B) และแก้ไขจุดที่ผิดเพี้ยนลงบนไฟล์ PDF จริงอย่างแม่นยำครบถ้วน")
+st.caption("เปรียบเทียบไฟล์ Quotation (File A) กับ PO (File B) ตรวจสอบความถูกต้องตามใบตั้งต้นอย่างเข้มงวด พร้อมแก้ไขลงบน PDF จริง")
 
 api_key = st.text_input("🔑 กรอก Gemini API Key ของคุณที่นี่", type="password", help="วาง API Key ที่ได้มาจาก Google AI Studio ตรงนี้")
 
@@ -104,11 +104,13 @@ def annotate_pdf_smart_search(input_pdf_bytes, corrections):
         target_page_idx = page_hint if (0 <= page_hint < len(doc)) else 0
         page = doc[target_page_idx]
         
+        # 1. ใช้พิกัด box_2d จาก AI ถ้ามี
         if box_2d and len(box_2d) == 4:
             ymin, xmin, ymax, xmax = box_2d
             w, h = page.rect.width, page.rect.height
             inst = fitz.Rect(xmin * w / 1000.0, ymin * h / 1000.0, xmax * w / 1000.0, ymax * h / 1000.0)
             
+        # 2. ค้นหาด้วย Exact Search บนหน้าพิกัด หรือสแกนหาทั่วทุกหน้า
         if not inst or inst.is_empty:
             text_instances = page.search_for(wrong_text)
             if text_instances:
@@ -122,6 +124,7 @@ def annotate_pdf_smart_search(input_pdf_bytes, corrections):
                         inst = found[0]
                         break
                         
+        # 3. แยก Token ค้นหาเฉพาะรหัส/ตัวเลขย่อยสำคัญ
         if not inst or inst.is_empty:
             keywords = re.findall(r'[A-Za-z0-9\-\/\.]+', wrong_text)
             keywords.sort(key=len, reverse=True)
@@ -178,7 +181,7 @@ def extract_sensible_corrections(text):
                 wrong_val = cols[2]
                 correct_val = cols[1]
                 remark = cols[3]
-                if any(kw in remark for kw in ["ผิด", "แก้", "ไม่ตรง", "เปลี่ยน", "ต่าง"]):
+                if any(kw in remark for kw in ["ผิด", "แก้", "ไม่ตรง", "เปลี่ยน", "ต่าง", "ขาด", "หาย"]):
                     if wrong_val and correct_val and "รายละเอียด" not in wrong_val:
                         if not any(c.get("wrong") == wrong_val for c in corrections):
                             corrections.append({
@@ -190,7 +193,7 @@ def extract_sensible_corrections(text):
 
 st.divider()
 
-if st.button("🚀 เริ่มตรวจสอบและแก้ไขไฟล์ PDF อย่างสมเหตุสมผล", type="primary", use_container_width=True):
+if st.button("🚀 เริ่มตรวจสอบและแก้ไขไฟล์ PDF ตามใบตั้งต้น", type="primary", use_container_width=True):
     if not api_key:
         st.error("❌ กรุณากรอก Gemini API Key ในช่องด้านบนก่อนครับ")
     elif not file_a or not file_b:
@@ -209,18 +212,18 @@ if st.button("🚀 เริ่มตรวจสอบและแก้ไข�
             g_b = upload_to_gemini(client, file_b)
             uploaded_files.append(g_b.name)
             
-            status_box.write("🤖 AI กำลังเปรียบเทียบหาจุดที่ข้อมูลผิดเพี้ยนจริง...")
+            status_box.write("🤖 AI กำลังตรวจสอบความถูกต้องตามใบตั้งต้นอย่างเข้มงวด...")
             
             prompt = '''จงเปรียบเทียบเอกสาร B (ไฟล์ตรวจสอบ PO) กับ เอกสาร A (ไฟล์ตั้งต้น Quotation) อย่างละเอียดทุกหน้า
 
-หลักการตรวจอย่างสมเหตุสมผล:
-1. ตรวจสอบเฉพาะจุดที่ 'ข้อมูลผิดเพี้ยน/ไม่ตรงกัน' จริงๆ เท่านั้น (เช่น รหัสสินค้าผิด, ตัวเลขราคาผิด, จำนวนไม่เท่ากัน)
-2. หากเอกสาร B มีการย่อข้อความธรรมดา แต่สเปกและรหัสหลักถูกต้อง ให้ถือว่าผ่าน (ไม่ต้องแก้ไข)
-3. หากข้อมูลผิด ให้ระบุรหัสหรือคำสั้นๆ ที่ผิดจริงใน B เป็น "wrong" และระบุรหัสหรือคำที่ถูกต้องจาก A เป็น "correct" เพื่อนำไปวาดขีดฆ่าแก้ไข
+หลักเกณฑ์การตรวจสอบอ้างอิงไฟล์ตั้งต้น (Quotation A):
+1. ยึดข้อมูลในเอกสาร A เป็นความถูกต้องหลัก 100% (ทั้ง Description/รหัสรุ่นสินค้า, ราคา, จำนวน)
+2. หากเอกสาร B มีการย่อข้อความ แต่ทำให้ 'สาระสำคัญ/สเปก/คุณลักษณะ/รหัส' ตกหล่น หายไป หรือขัดแย้งกับเอกสาร A ให้ถือว่า "ผิดพลาด" ทันที
+3. ระบุข้อความ/รหัสที่ผิดหรือตกหล่นใน B เป็น "wrong" และระบุข้อความ/รหัสที่ถูกต้องจาก A เป็น "correct" เพื่อนำไปวาดขีดฆ่าและแปะแก้ไขลงบนไฟล์ PDF
 
 รูปแบบรายงานสรุป:
 ### ตารางเปรียบเทียบและผลการตรวจสอบ
-แสดงผลเป็นตาราง Markdown 4 คอลัมน์หลัก (รายการ/รหัสสินค้า, รายละเอียดใน A (ถูกต้อง), รายละเอียดใน B (ที่ผิด), ผลการตรวจสอบ/สิ่งที่ต้องแก้ไข)
+แสดงผลเป็นตาราง Markdown 4 คอลัมน์หลัก (รายการ/รหัสสินค้า, รายละเอียดใน A (ถูกต้อง), รายละเอียดใน B (ที่ผิด/ตกหล่น), ผลการตรวจสอบ/สิ่งที่ต้องแก้ไข)
 
 ### สรุปภาพรวม
 สรุป 3 ด้านหลัก (ราคา, จำนวน, รายละเอียด)
@@ -231,7 +234,7 @@ if st.button("🚀 เริ่มตรวจสอบและแก้ไข�
 [
   {
     "page": 1,
-    "wrong": "คำ/รหัสที่ผิดใน B",
+    "wrong": "คำ/รหัสที่ผิดหรือตกหล่นใน B",
     "correct": "คำ/รหัสที่ถูกต้องจาก A",
     "box_2d": [ymin, xmin, ymax, xmax]
   }
@@ -271,7 +274,7 @@ if st.button("🚀 เริ่มตรวจสอบและแก้ไข�
             
             clean_output = response.text.replace("<br>", " ").replace("<br/>", " ").replace("<BR>", " ")
             
-            status_box.write("⚙️ กำลังวาดขีดฆ่าเฉพาะจุดที่ผิดและฝังคำแก้ลงในไฟล์ PDF...")
+            status_box.write("⚙️ กำลังวาดขีดฆ่าจุดที่ผิดและฝังคำแก้ที่ถูกต้องลงในไฟล์ PDF...")
             
             corrections_list = extract_sensible_corrections(response.text)
             file_b.seek(0)

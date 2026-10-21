@@ -133,12 +133,3 @@ def annotate_pdf_smart_search(input_pdf_bytes, corrections):
                     for p_idx, p in enumerate(doc):
                         found = p.search_for(kw)
                         if found:
-                            page = p
-                            target_page_idx = p_idx
-                            inst = found[0]
-                            break
-                    if inst and not inst.is_empty:
-                        break
-                        
-        if inst and not inst.is_empty:
-            draw

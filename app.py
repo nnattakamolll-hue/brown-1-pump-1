@@ -15,7 +15,7 @@ st.set_page_config(
 )
 
 st.title("📄 ระบบตรวจสอบและแก้ไขข้อความบนไฟล์ PDF (PO) อัตโนมัติ")
-st.caption("เปรียบเทียบไฟล์ Quotation (File A) กับ PO (File B) ทุกหน้าแบบละเอียด ขีดฆ่าเฉพาะจุดที่ผิดอย่างครบถ้วน 100%")
+st.caption("เปรียบเทียบไฟล์ Quotation (File A) กับ PO (File B) แล้วนำจุดที่ผิดและคำแก้ที่ถูกต้องไปฝังลงใน PDF จริงครบถ้วนทุกจุด")
 
 api_key = st.text_input("🔑 กรอก Gemini API Key ของคุณที่นี่", type="password", help="วาง API Key ที่ได้มาจาก Google AI Studio ตรงนี้")
 
@@ -43,31 +43,31 @@ def upload_to_gemini(client, uploaded_file):
     os.unlink(tmp_path)
     return g_file
 
-def draw_precise_red_correction(page, inst, correct_text, index):
+def draw_red_correction_on_rect(page, rect, correct_text, index):
     """
-    วาดเส้นขีดฆ่าสีแดงกระชับเฉพาะคำที่ผิด ลากเส้นชี้ และแปะกล่องข้อความแก้ไขสีแดง
+    วาดเส้นขีดฆ่าสีแดง ลากเส้นชี้ และสร้างกล่องข้อความสีแดงฝังลงในเนื้อ PDF
     """
-    y_center = (inst.y0 + inst.y1) / 2
+    y_center = (rect.y0 + rect.y1) / 2
     
-    # 1. วาดเส้นขีดฆ่าสีแดงกระชับเฉพาะความยาวคำผิด
+    # 1. วาดเส้นขีดฆ่าสีแดงทับตำแหน่งข้อความที่ผิด
     page.draw_line(
-        fitz.Point(inst.x0, y_center),
-        fitz.Point(inst.x1, y_center),
+        fitz.Point(rect.x0, y_center),
+        fitz.Point(rect.x1, y_center),
         color=(1, 0, 0),
         width=1.8
     )
     
-    # 2. คำนวณตำแหน่งกล่องข้อความด้านข้าง
-    box_x0 = inst.x1 + 10
-    box_y0 = inst.y0 + (index * 18)
-    box_w = max(len(correct_text) * 7.5, 110)
+    # 2. คำนวณตำแหน่งกล่องข้อความแก้ไข
+    box_x0 = rect.x1 + 12
+    box_y0 = rect.y0 + (index * 20)
+    box_w = max(len(correct_text) * 7.5, 120)
     box_h = 18
     
-    rect = fitz.Rect(box_x0, box_y0, box_x0 + box_w, box_y0 + box_h)
+    box_rect = fitz.Rect(box_x0, box_y0, box_x0 + box_w, box_y0 + box_h)
     
-    # 3. วาดเส้นชี้สีแดง
+    # 3. วาดเส้นชี้สีแดงจากคำผิดไปยังกล่องข้อความ
     page.draw_line(
-        fitz.Point(inst.x1, y_center),
+        fitz.Point(rect.x1, y_center),
         fitz.Point(box_x0, box_y0 + (box_h / 2)),
         color=(1, 0, 0),
         width=1.0
@@ -75,13 +75,13 @@ def draw_precise_red_correction(page, inst, correct_text, index):
     
     # 4. วาดกล่องข้อความสีแดง พื้นหลังสีขาว
     page.draw_rect(
-        rect,
+        box_rect,
         color=(1, 0, 0),
         fill=(1, 1, 1),
         width=1.2
     )
     
-    # 5. พิมพ์ตัวหนังสือสีแดงเฉพาะคำแก้ที่ถูกต้อง
+    # 5. พิมพ์ตัวหนังสือสีแดงแสดงคำที่ถูกต้อง
     page.insert_text(
         fitz.Point(box_x0 + 4, box_y0 + 13),
         correct_text,
@@ -90,7 +90,7 @@ def draw_precise_red_correction(page, inst, correct_text, index):
         fontname="helv"
     )
 
-def annotate_pdf_complete_exhaustive(input_pdf_bytes, corrections):
+def annotate_pdf_complete_hybrid(input_pdf_bytes, corrections):
     doc = fitz.open(stream=input_pdf_bytes, filetype="pdf")
     applied_logs = []
     
@@ -98,56 +98,64 @@ def annotate_pdf_complete_exhaustive(input_pdf_bytes, corrections):
         wrong_text = str(item.get("wrong", "")).strip()
         correct_text = str(item.get("correct", "")).strip()
         page_hint = int(item.get("page", 1)) - 1
+        box_2d = item.get("box_2d")
         
         if not wrong_text or len(wrong_text) < 1:
             continue
             
-        found_and_drawn = False
+        rect_to_draw = None
+        target_page_idx = page_hint if (0 <= page_hint < len(doc)) else 0
+        page = doc[target_page_idx]
         
-        # วนสแกนทุกหน้าเพื่อความชัวร์ (เริ่มจากหน้า hint ก่อน)
-        pages_to_search = list(range(len(doc)))
-        if 0 <= page_hint < len(doc):
-            pages_to_search.remove(page_hint)
-            pages_to_search.insert(0, page_hint)
+        # 1. ใช้พิกัด box_2d จาก AI ถ้ามี
+        if box_2d and len(box_2d) == 4:
+            ymin, xmin, ymax, xmax = box_2d
+            w, h = page.rect.width, page.rect.height
+            rect_to_draw = fitz.Rect(xmin * w / 1000.0, ymin * h / 1000.0, xmax * w / 1000.0, ymax * h / 1000.0)
             
-        for p_idx in pages_to_search:
-            page = doc[p_idx]
-            
-            # 1. ลองค้นหาข้อความตรงๆ
-            text_instances = page.search_for(wrong_text)
-            
-            # 2. ถ้าเป็นข้อความที่มีสัญลักษณ์ แยกส่วนคำ/รหัสค้นหา
-            if not text_instances and (" " in wrong_text or "-" in wrong_text or "/" in wrong_text):
-                parts = re.split(r'[\s\-\/]+', wrong_text)
-                for part in parts:
-                    if len(part) >= 3 and not part.isdigit():
-                        text_instances = page.search_for(part)
-                        if text_instances:
-                            wrong_text = part
-                            break
-                            
-            if text_instances:
-                for inst in text_instances:
-                    draw_precise_red_correction(page, inst, correct_text, len(applied_logs))
-                    applied_logs.append({
-                        "page": p_idx + 1,
-                        "wrong": wrong_text,
-                        "correct": correct_text
-                    })
-                found_and_drawn = True
-                break  # เจอและวาดแล้ว ย้ายไปทำรายการถัดไป
+        # 2. ค้นหาข้อความแบบ Text Search ถ้าพิกัดไม่มีหรือไม่ตรง
+        if not rect_to_draw or rect_to_draw.is_empty:
+            pages_to_search = list(range(len(doc)))
+            if target_page_idx in pages_to_search:
+                pages_to_search.remove(target_page_idx)
+                pages_to_search.insert(0, target_page_idx)
+                
+            for p_idx in pages_to_search:
+                p = doc[p_idx]
+                text_instances = p.search_for(wrong_text)
+                
+                if not text_instances and (" " in wrong_text or "-" in wrong_text or "/" in wrong_text):
+                    parts = re.split(r'[\s\-\/]+', wrong_text)
+                    for part in parts:
+                        if len(part) >= 3 and not part.isdigit():
+                            text_instances = p.search_for(part)
+                            if text_instances:
+                                wrong_text = part
+                                break
+                                
+                if text_instances:
+                    rect_to_draw = text_instances[0]
+                    target_page_idx = p_idx
+                    page = p
+                    break
+                    
+        # สั่งวาดจุดแก้ไขลงบนไฟล์ PDF
+        if rect_to_draw and not rect_to_draw.is_empty:
+            draw_red_correction_on_rect(page, rect_to_draw, correct_text, len(applied_logs))
+            applied_logs.append({
+                "page": target_page_idx + 1,
+                "wrong": wrong_text,
+                "correct": correct_text
+            })
 
     output_pdf_bytes = doc.write(clean=True, deflate=True)
     doc.close()
     return output_pdf_bytes, applied_logs
 
-def extract_all_corrections_robust(text):
-    """
-    แกะรายการแก้ไขอย่างถี่ถ้วนจากทั้ง JSON และตาราง Markdown ทุกแถวเพื่อเก็บตกให้ครบ 100%
-    """
+def extract_corrections_robust_all(text):
     corrections = []
     
-    # 1. แกะจาก JSON Block
+    # 1. ดึงข้อมูลจาก JSON Block
     try:
         match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
         if match:
@@ -157,30 +165,28 @@ def extract_all_corrections_robust(text):
     except:
         pass
         
-    # 2. แกะเก็บตกจากตาราง Markdown สรุปผล
+    # 2. ดึงเก็บตกจากตาราง Markdown ทุกแถว
     lines = text.split('\n')
     for line in lines:
         if '|' in line and '---' not in line and 'รายการ' not in line:
             cols = [c.strip() for c in line.split('|') if c.strip()]
             if len(cols) >= 4:
-                wrong_val = cols[2]  # รายละเอียดไฟล์ B
-                correct_val = cols[1] # รายละเอียดไฟล์ A
+                wrong_val = cols[2]  # รายละเอียดใน B ที่ผิด
+                correct_val = cols[1] # รายละเอียดใน A ที่ถูก
                 
-                # สกัดรหัส/คำผิดสั้นๆ ออกมาจากคอลัมน์
                 if wrong_val and correct_val and "รายละเอียด" not in wrong_val:
-                    # ถ้ายังไม่มีในรายการ ให้เพิ่มเข้าไปสแกนวาดเก็บตก
                     if not any(c.get("wrong") == wrong_val for c in corrections):
                         corrections.append({
                             "page": 1,
-                            "wrong": wrong_val[:25],
-                            "correct": correct_val[:25]
+                            "wrong": wrong_val,
+                            "correct": correct_val
                         })
                         
     return corrections
 
 st.divider()
 
-if st.button("🚀 เริ่มตรวจสอบและแก้ไขไฟล์ PDF ครบทุกจุดทุกหน้า", type="primary", use_container_width=True):
+if st.button("🚀 เริ่มตรวจสอบและวาดแก้ไขลงไฟล์ PDF ครบทุกจุด", type="primary", use_container_width=True):
     if not api_key:
         st.error("❌ กรุณากรอก Gemini API Key ในช่องด้านบนก่อนครับ")
     elif not file_a or not file_b:
@@ -199,36 +205,33 @@ if st.button("🚀 เริ่มตรวจสอบและแก้ไข�
             g_b = upload_to_gemini(client, file_b)
             uploaded_files.append(g_b.name)
             
-            status_box.write("🤖 AI กำลังสแกนตรวจสอบทุกหน้า ทุกรายการสินค้า แบบละเอียดถี่ถ้วน...")
+            status_box.write("🤖 AI กำลังสแกนตรวจหาข้อผิดพลาดและข้อมูลที่ถูกต้อง...")
             
             prompt = """
-            จงตรวจสอบเปรียบเทียบเอกสาร B (ไฟล์ตรวจสอบ PO) กับ เอกสาร A (ไฟล์ตั้งต้น Quotation) อย่างละเอียดถี่ถ้วนแบบ 'ทุกหน้า ทุกรายการสินค้า (Item by Item)'
-            ห้ามละเว้น ห้ามสรุปย่อ และห้ามข้ามรายการสินค้าในหน้าถัดๆ ไปเด็ดขาด
-
-            หัวข้อที่ต้องสแกนตรวจ:
-            1. Description (รายละเอียดสินค้า / รหัสรุ่น / สเปก): ต้องตรงกันทุกอักขระ
-            2. จำนวนสินค้า (Quantity / Qty): ตัวเลขและหน่วยนับต้องตรงกัน
-            3. ราคา (Unit Price / Amount): ตัวเลขราคาต้องตรงกัน
-
-            กฎสำคัญสำหรับการขีดฆ่าบน PDF:
-            - ในค่า "wrong" ให้ใส่เฉพาะคำ/รหัส/ตัวเลขสั้นๆ ที่ผิดจริงในเอกสาร B (ห้ามใส่ทั้งประโยคยาว)
-            - ในค่า "correct" ให้ใส่เฉพาะคำ/รหัส/ตัวเลขสั้นๆ ที่ถูกต้องจาก A (ไม่ต้องนำรายละเอียดส่วนย่อยขยายความมาเติมใส่)
+            จงตรวจสอบเปรียบเทียบเอกสาร B (ไฟล์ตรวจสอบ PO) กับ เอกสาร A (ไฟล์ตั้งต้น Quotation) อย่างละเอียดทุกหน้า ทุกรายการสินค้า:
+            1. ตรวจสอบว่ามีข้อมูลตรงไหนบ้างที่ผิดพลาด (Description/รหัสรุ่น, ราคา, จำนวน) เมื่อเทียบกับเอกสาร A
+            2. ระบุอย่างชัดเจนว่าข้อมูลที่ผิดในเอกสาร B คืออะไร (wrong) และต้องแก้ไขเป็นข้อมูลอะไรที่ถูกต้องจากเอกสาร A (correct)
 
             รูปแบบรายงานสรุป:
             ### ตารางเปรียบเทียบและผลการตรวจสอบ
-            แสดงผลเป็นตาราง Markdown 4 คอลัมน์หลัก (รายการ/รหัสสินค้า, รายละเอียดใน A, รายละเอียดใน B, ผลการตรวจสอบ/สิ่งที่ต้องแก้ไข)
+            ให้แสดงผลเป็นตาราง Markdown 4 คอลัมน์หลัก:
+            1. รายการ / รหัสสินค้า (ไฟล์ B)
+            2. รายละเอียดใน เอกสาร A (ไฟล์ตั้งต้น - ข้อมูลที่ถูกต้อง)
+            3. รายละเอียดใน เอกสาร B (ไฟล์ตรวจสอบ - ข้อมูลที่ผิดจริง)
+            4. ผลการตรวจสอบ / สิ่งที่ต้องแก้ไข (ระบุจุดผิดและคำที่ถูกต้องแทนที่)
 
             ### สรุปภาพรวม
             สรุป 3 ด้านหลัก (ราคา, จำนวน, รายละเอียด)
 
-            คำสั่งสำคัญมากๆ สำหรับการวาดแก้ไขบน PDF:
-            ที่บรรทัดท้ายสุด ส่ง JSON สรุปจุดที่ผิดทั้งหมดแบบครบทุกจุด ทุกหน้า ทุกรายการ:
+            คำสั่งสำคัญมากๆ สำหรับการนำรายละเอียดไปวาดแก้ไขบน PDF:
+            ที่บรรทัดท้ายสุดของคำตอบ ให้ส่งโครงสร้าง JSON สรุปจุดที่ผิดทั้งหมด (wrong) และคำที่ถูกต้องสำหรับแก้ไขแทนที่ (correct) พร้อมระบุเลขหน้า (page เริ่มจาก 1) และพิกัด [ymin, xmin, ymax, xmax] (box_2d) อย่างครบถ้วนทุกจุด:
             ```json
             [
               {
                 "page": 1,
-                "wrong": "คำผิดสั้นๆ ใน B",
-                "correct": "คำถูกสั้นๆ จาก A"
+                "wrong": "คำ/รหัสที่ผิดจริงในเอกสาร B",
+                "correct": "คำ/รหัสที่ถูกต้องจากเอกสาร A",
+                "box_2d": [ymin, xmin, ymax, xmax]
               }
             ]
             ```
@@ -242,7 +245,7 @@ if st.button("🚀 เริ่มตรวจสอบและแก้ไข�
             
             for attempt in range(max_retries):
                 try:
-                    status_box.write(f"🔄 กำลังวิเคราะห์ข้อมูลอย่างละเอียด (พยายามครั้งที่ {attempt+1}/{max_retries})...")
+                    status_box.write(f"🔄 กำลังวิเคราะห์ข้อมูล (พยายามครั้งที่ {attempt+1}/{max_retries})...")
                     response = client.models.generate_content(
                         model='gemini-3.8-flash',
                         contents=[g_a, g_b, prompt]
@@ -262,20 +265,20 @@ if st.button("🚀 เริ่มตรวจสอบและแก้ไข�
             
             clean_output = response.text.replace("<br>", " ").replace("<br/>", " ").replace("<BR>", " ")
             
-            status_box.write("⚙️ กำลังสแกนหาพิกัดและวาดเส้นขีดฆ่าลงบน PDF ให้ครบทุกจุด...")
+            status_box.write("⚙️ กำลังขีดฆ่าคำผิดและฝังข้อความที่ถูกต้องลงในไฟล์ PDF...")
             
-            corrections_list = extract_all_corrections_robust(response.text)
+            corrections_list = extract_corrections_robust_all(response.text)
             file_b.seek(0)
             pdf_bytes = file_b.read()
-            annotated_pdf_bytes, applied_logs = annotate_pdf_complete_exhaustive(pdf_bytes, corrections_list)
+            annotated_pdf_bytes, applied_logs = annotate_pdf_complete_hybrid(pdf_bytes, corrections_list)
             
-            status_box.update(label=f"✅ ตรวจสอบเสร็จสิ้น! (ทำการขีดฆ่าและแก้ไขลง PDF ไปทั้งหมด {len(applied_logs)} จุด)", state="complete", expanded=False)
+            status_box.update(label=f"✅ ตรวจสอบและวาดแก้ไขลง PDF เรียบร้อยแล้ว! (รวมทั้งหมด {len(applied_logs)} จุด)", state="complete", expanded=False)
             
             st.markdown(clean_output)
             
-            with st.expander("🔍 ตรวจสอบรายการจุดขีดฆ่าและแก้ไขทั้งหมดบน PDF"):
-                st.write("รายการจุดผิดทั้งหมดที่รวบรวมได้:", corrections_list)
-                st.write("รายการที่ทำการสแกนเจอและวาดลง PDF สำเร็จจริง:", applied_logs)
+            with st.expander("🔍 ตรวจสอบรายการจุดแก้ไขทั้งหมดที่ฝังลงบน PDF"):
+                st.write("รายการจุดแก้ไขทั้งหมดที่รวบรวมได้:", corrections_list)
+                st.write("รายการที่ทำการวาดลงไฟล์ PDF สำเร็จจริง:", applied_logs)
             
             st.divider()
             col_dl1, col_dl2 = st.columns(2)

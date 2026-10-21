@@ -90,7 +90,10 @@ def draw_sensible_red_correction(page, inst, correct_text, index):
         fontname="helv"
     )
 
-def annotate_pdf_robust(input_pdf_bytes, corrections):
+def annotate_pdf_smart_search(input_pdf_bytes, corrections):
+    """
+    ระบบค้นหาพิกัดอัจฉริยะ (Smart Keyword & Token Matching) แก้ไขไฟล์ PDF จริงครบทุกจุด
+    """
     doc = fitz.open(stream=input_pdf_bytes, filetype="pdf")
     applied_logs = []
     
@@ -107,13 +110,13 @@ def annotate_pdf_robust(input_pdf_bytes, corrections):
         target_page_idx = page_hint if (0 <= page_hint < len(doc)) else 0
         page = doc[target_page_idx]
         
-        # วิธีที่ 1: ใช้พิกัด box_2d จาก AI ถ้ามี
+        # ลำดับที่ 1: ใช้พิกัด box_2d จาก AI ถ้ามี
         if box_2d and len(box_2d) == 4:
             ymin, xmin, ymax, xmax = box_2d
             w, h = page.rect.width, page.rect.height
             inst = fitz.Rect(xmin * w / 1000.0, ymin * h / 1000.0, xmax * w / 1000.0, ymax * h / 1000.0)
             
-        # วิธีที่ 2: ค้นหาด้วย Exact Search บนหน้าพิกัด หรือสแกนหาทั่วทุกหน้า
+        # ลำดับที่ 2: ค้นหาด้วย Exact Search บนหน้าพิกัด หรือสแกนหาทั่วทุกหน้า
         if not inst or inst.is_empty:
             text_instances = page.search_for(wrong_text)
             if text_instances:
@@ -127,13 +130,17 @@ def annotate_pdf_robust(input_pdf_bytes, corrections):
                         inst = found[0]
                         break
                         
-        # วิธีที่ 3: ถ้ายังไม่เจอ ให้แยก Token ค้นหาเฉพาะรหัส/ตัวเลขย่อยสำคัญ
+        # ลำดับที่ 3 (Smart Fallback): ถ้ายังไม่เจอ ให้ดึงเฉพาะรหัสรุ่น หมายเลข หรือตัวเลขราคาที่สำคัญมาค้นหา
         if not inst or inst.is_empty:
-            tokens = re.findall(r'[A-Za-z0-9\-]+', wrong_text)
-            for token in tokens:
-                if len(token) >= 3:
+            # ดึงเฉพาะกลุ่มคำภาษาอังกฤษ ตัวเลข รหัส หรือเครื่องหมายขีด (- /) ออกมาเป็นคีย์เวิร์ด
+            keywords = re.findall(r'[A-Za-z0-9\-\/\.]+', wrong_text)
+            # เรียงลำดับจากคำที่ยาวที่สุด (มักจะเป็นรหัสรุ่นที่จำเพาะที่สุด) มาค้นหาก่อน
+            keywords.sort(key=len, reverse=True)
+            
+            for kw in keywords:
+                if len(kw) >= 3:
                     for p_idx, p in enumerate(doc):
-                        found = p.search_for(token)
+                        found = p.search_for(kw)
                         if found:
                             page = p
                             target_page_idx = p_idx
@@ -142,6 +149,7 @@ def annotate_pdf_robust(input_pdf_bytes, corrections):
                     if inst and not inst.is_empty:
                         break
                         
+        # หากเจอพิกัดแล้ว สั่งวาดเส้นขีดฆ่าและแปะกล่องข้อความลงบน PDF ทันที
         if inst and not inst.is_empty:
             draw_sensible_red_correction(page, inst, correct_text, len(applied_logs))
             applied_logs.append({
@@ -227,7 +235,7 @@ if st.button("🚀 เริ่มตรวจสอบและแก้ไข�
             หลักการตรวจอย่างสมเหตุสมผล:
             1. ตรวจสอบเฉพาะจุดที่ 'ข้อมูลผิดเพี้ยน/ไม่ตรงกัน' จริงๆ เท่านั้น (เช่น รหัสสินค้าผิด, ตัวเลขราคาผิด, จำนวนไม่เท่ากัน)
             2. หากเอกสาร B มีการย่อข้อความธรรมดา แต่สเปกและรหัสหลักถูกต้อง ให้ถือว่าผ่าน (ไม่ต้องแก้ไข)
-            3. หากข้อมูลผิด ให้ระบุคำ/รหัส/ตัวเลขที่ผิดจริงใน B เป็น "wrong" และระบุคำ/รหัสที่ถูกต้องจาก A เป็น "correct" เพื่อนำไปวาดขีดฆ่าแก้ไข
+            3. หากข้อมูลผิด ให้ระบุรหัสหรือคำสั้นๆ ที่ผิดจริงใน B เป็น "wrong" และระบุรหัสหรือคำที่ถูกต้องจาก A เป็น "correct" เพื่อนำไปวาดขีดฆ่าแก้ไข
 
             รูปแบบรายงานสรุป:
             ### ตารางเปรียบเทียบและผลการตรวจสอบ
@@ -242,88 +250,8 @@ if st.button("🚀 เริ่มตรวจสอบและแก้ไข�
             [
               {
                 "page": 1,
-                "wrong": "คำ/รหัสที่ผิดใน B",
-                "correct": "คำ/รหัสที่ถูกต้องจาก A",
+                "wrong": "คำ/รหัสสั้นๆ ที่ผิดใน B",
+                "correct": "คำ/รหัสสั้นๆ ที่ถูกต้องจาก A",
                 "box_2d": [ymin, xmin, ymax, xmax]
               }
             ]
-            ```
-            ห้ามใช้แท็ก HTML เช่น <br> เด็ดขาด
-            """
-            
-            max_retries = 5
-            retry_delay = 5
-            response = None
-            success = False
-            
-            config = types.GenerateContentConfig(
-                max_output_tokens=8192,
-                temperature=0.1
-            )
-            
-            for attempt in range(max_retries):
-                try:
-                    status_box.write(f"🔄 กำลังวิเคราะห์ข้อมูล (พยายามครั้งที่ {attempt+1}/{max_retries})...")
-                    response = client.models.generate_content(
-                        model='gemini-3.8-flash',
-                        contents=[g_a, g_b, prompt],
-                        config=config
-                    )
-                    success = True
-                    break
-                except Exception as api_err:
-                    if ("503" in str(api_err) or "UNAVAILABLE" in str(api_err)) and attempt < max_retries - 1:
-                        status_box.warning(f"⚠️ เซิร์ฟเวอร์หนาแน่น กำลังลองใหม่ในอีก {retry_delay} วินาที...")
-                        time.sleep(retry_delay)
-                        retry_delay += 3
-                    else:
-                        raise api_err
-            
-            if not success or not response:
-                raise Exception("เซิร์ฟเวอร์หนาแน่นเกินไป โปรดลองกดปุ่มเริ่มตรวจสอบใหม่อีกครั้ง")
-            
-            clean_output = response.text.replace("<br>", " ").replace("<br/>", " ").replace("<BR>", " ")
-            
-            status_box.write("⚙️ กำลังวาดขีดฆ่าเฉพาะจุดที่ผิดและฝังคำแก้ลงในไฟล์ PDF...")
-            
-            corrections_list = extract_sensible_corrections(response.text)
-            file_b.seek(0)
-            pdf_bytes = file_b.read()
-            annotated_pdf_bytes, applied_logs = annotate_pdf_robust(pdf_bytes, corrections_list)
-            
-            status_box.update(label=f"✅ ตรวจสอบและแก้ไขเรียบร้อย! (วาดจุดที่ผิดจริงลง PDF ไปทั้งหมด {len(applied_logs)} จุด)", state="complete", expanded=False)
-            
-            st.markdown(clean_output)
-            
-            with st.expander("🔍 ตรวจสอบรายการจุดแก้ไขทั้งหมดที่ฝังลงบน PDF"):
-                st.write("รายการจุดแก้ไขที่พบและดึงได้:", corrections_list)
-                st.write("รายการที่ทำการวาดลงไฟล์ PDF สำเร็จจริง:", applied_logs)
-            
-            st.divider()
-            col_dl1, col_dl2 = st.columns(2)
-            with col_dl1:
-                st.download_button(
-                    label="📥 ดาวน์โหลดรายงานผลสรุป (.txt)",
-                    data=clean_output,
-                    file_name="po_audit_report.txt",
-                    mime="text/plain"
-                )
-            with col_dl2:
-                st.download_button(
-                    label=f"📥 ดาวน์โหลดไฟล์ PDF ที่แก้ไขจุดผิดแล้ว ({len(applied_logs)} จุด) (.pdf)",
-                    data=annotated_pdf_bytes,
-                    file_name="annotated_po_document.pdf",
-                    mime="application/pdf"
-                )
-
-        except Exception as e:
-            status_box.update(label="❌ เกิดข้อผิดพลาดในการประมวลผล", state="error", expanded=True)
-            st.error(f"รายละเอียด: {str(e)}")
-            
-        finally:
-            if uploaded_files and 'client' in locals():
-                for name in uploaded_files:
-                    try:
-                        client.files.delete(name=name)
-                    except:
-                        pass

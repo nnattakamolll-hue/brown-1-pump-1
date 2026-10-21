@@ -44,9 +44,6 @@ def upload_to_gemini(client, uploaded_file):
     return g_file
 
 def draw_sensible_red_correction(page, inst, correct_text, index):
-    """
-    วาดเส้นขีดฆ่าสีแดงเฉพาะจุดที่ผิดอย่างกระชับ และแปะกล่องข้อความแก้ไขสีแดงแบบอ่านง่าย
-    """
     y_center = (inst.y0 + inst.y1) / 2
     
     # 1. วาดเส้นขีดฆ่าสีแดงกระชับเฉพาะความยาวคำผิด
@@ -91,9 +88,6 @@ def draw_sensible_red_correction(page, inst, correct_text, index):
     )
 
 def annotate_pdf_smart_search(input_pdf_bytes, corrections):
-    """
-    ระบบค้นหาพิกัดอัจฉริยะ (Smart Keyword & Token Matching) แก้ไขไฟล์ PDF จริงครบทุกจุด
-    """
     doc = fitz.open(stream=input_pdf_bytes, filetype="pdf")
     applied_logs = []
     
@@ -110,13 +104,11 @@ def annotate_pdf_smart_search(input_pdf_bytes, corrections):
         target_page_idx = page_hint if (0 <= page_hint < len(doc)) else 0
         page = doc[target_page_idx]
         
-        # ลำดับที่ 1: ใช้พิกัด box_2d จาก AI ถ้ามี
         if box_2d and len(box_2d) == 4:
             ymin, xmin, ymax, xmax = box_2d
             w, h = page.rect.width, page.rect.height
             inst = fitz.Rect(xmin * w / 1000.0, ymin * h / 1000.0, xmax * w / 1000.0, ymax * h / 1000.0)
             
-        # ลำดับที่ 2: ค้นหาด้วย Exact Search บนหน้าพิกัด หรือสแกนหาทั่วทุกหน้า
         if not inst or inst.is_empty:
             text_instances = page.search_for(wrong_text)
             if text_instances:
@@ -130,13 +122,9 @@ def annotate_pdf_smart_search(input_pdf_bytes, corrections):
                         inst = found[0]
                         break
                         
-        # ลำดับที่ 3 (Smart Fallback): ถ้ายังไม่เจอ ให้ดึงเฉพาะรหัสรุ่น หมายเลข หรือตัวเลขราคาที่สำคัญมาค้นหา
         if not inst or inst.is_empty:
-            # ดึงเฉพาะกลุ่มคำภาษาอังกฤษ ตัวเลข รหัส หรือเครื่องหมายขีด (- /) ออกมาเป็นคีย์เวิร์ด
             keywords = re.findall(r'[A-Za-z0-9\-\/\.]+', wrong_text)
-            # เรียงลำดับจากคำที่ยาวที่สุด (มักจะเป็นรหัสรุ่นที่จำเพาะที่สุด) มาค้นหาก่อน
             keywords.sort(key=len, reverse=True)
-            
             for kw in keywords:
                 if len(kw) >= 3:
                     for p_idx, p in enumerate(doc):
@@ -149,7 +137,6 @@ def annotate_pdf_smart_search(input_pdf_bytes, corrections):
                     if inst and not inst.is_empty:
                         break
                         
-        # หากเจอพิกัดแล้ว สั่งวาดเส้นขีดฆ่าและแปะกล่องข้อความลงบน PDF ทันที
         if inst and not inst.is_empty:
             draw_sensible_red_correction(page, inst, correct_text, len(applied_logs))
             applied_logs.append({
@@ -164,8 +151,6 @@ def annotate_pdf_smart_search(input_pdf_bytes, corrections):
 
 def extract_sensible_corrections(text):
     corrections = []
-    
-    # 1. ดึงข้อมูลจาก JSON Block ทุกบล็อก
     json_matches = re.findall(r'```json\s*(.*?)\s*```', text, re.DOTALL)
     for j_str in json_matches:
         try:
@@ -185,16 +170,14 @@ def extract_sensible_corrections(text):
         except:
             pass
             
-    # 2. แกะเก็บตกจากตาราง Markdown เฉพาะแถวที่มีการสั่งแก้ไขจริง
     lines = text.split('\n')
     for line in lines:
         if '|' in line and '---' not in line and 'รายการ' not in line:
             cols = [c.strip() for c in line.split('|') if c.strip()]
             if len(cols) >= 4:
-                wrong_val = cols[2]  # ข้อมูลผิดใน B
-                correct_val = cols[1] # ข้อมูลถูกใน A
-                remark = cols[3]      # ผลการตรวจ
-                
+                wrong_val = cols[2]
+                correct_val = cols[1]
+                remark = cols[3]
                 if any(kw in remark for kw in ["ผิด", "แก้", "ไม่ตรง", "เปลี่ยน", "ต่าง"]):
                     if wrong_val and correct_val and "รายละเอียด" not in wrong_val:
                         if not any(c.get("wrong") == wrong_val for c in corrections):
@@ -203,7 +186,6 @@ def extract_sensible_corrections(text):
                                 "wrong": wrong_val,
                                 "correct": correct_val
                             })
-                        
     return corrections
 
 st.divider()
@@ -229,29 +211,28 @@ if st.button("🚀 เริ่มตรวจสอบและแก้ไข�
             
             status_box.write("🤖 AI กำลังเปรียบเทียบหาจุดที่ข้อมูลผิดเพี้ยนจริง...")
             
-            prompt = """
-            จงเปรียบเทียบเอกสาร B (ไฟล์ตรวจสอบ PO) กับ เอกสาร A (ไฟล์ตั้งต้น Quotation) อย่างละเอียดทุกหน้า
+            prompt = """จงเปรียบเทียบเอกสาร B (ไฟล์ตรวจสอบ PO) กับ เอกสาร A (ไฟล์ตั้งต้น Quotation) อย่างละเอียดทุกหน้า
 
-            หลักการตรวจอย่างสมเหตุสมผล:
-            1. ตรวจสอบเฉพาะจุดที่ 'ข้อมูลผิดเพี้ยน/ไม่ตรงกัน' จริงๆ เท่านั้น (เช่น รหัสสินค้าผิด, ตัวเลขราคาผิด, จำนวนไม่เท่ากัน)
-            2. หากเอกสาร B มีการย่อข้อความธรรมดา แต่สเปกและรหัสหลักถูกต้อง ให้ถือว่าผ่าน (ไม่ต้องแก้ไข)
-            3. หากข้อมูลผิด ให้ระบุรหัสหรือคำสั้นๆ ที่ผิดจริงใน B เป็น "wrong" และระบุรหัสหรือคำที่ถูกต้องจาก A เป็น "correct" เพื่อนำไปวาดขีดฆ่าแก้ไข
+หลักการตรวจอย่างสมเหตุสมผล:
+1. ตรวจสอบเฉพาะจุดที่ 'ข้อมูลผิดเพี้ยน/ไม่ตรงกัน' จริงๆ เท่านั้น (เช่น รหัสสินค้าผิด, ตัวเลขราคาผิด, จำนวนไม่เท่ากัน)
+2. หากเอกสาร B มีการย่อข้อความธรรมดา แต่สเปกและรหัสหลักถูกต้อง ให้ถือว่าผ่าน (ไม่ต้องแก้ไข)
+3. หากข้อมูลผิด ให้ระบุรหัสหรือคำสั้นๆ ที่ผิดจริงใน B เป็น "wrong" และระบุรหัสหรือคำที่ถูกต้องจาก A เป็น "correct" เพื่อนำไปวาดขีดฆ่าแก้ไข
 
-            รูปแบบรายงานสรุป:
-            ### ตารางเปรียบเทียบและผลการตรวจสอบ
-            แสดงผลเป็นตาราง Markdown 4 คอลัมน์หลัก (รายการ/รหัสสินค้า, รายละเอียดใน A (ถูกต้อง), รายละเอียดใน B (ที่ผิด), ผลการตรวจสอบ/สิ่งที่ต้องแก้ไข)
+รูปแบบรายงานสรุป:
+### ตารางเปรียบเทียบและผลการตรวจสอบ
+แสดงผลเป็นตาราง Markdown 4 คอลัมน์หลัก (รายการ/รหัสสินค้า, รายละเอียดใน A (ถูกต้อง), รายละเอียดใน B (ที่ผิด), ผลการตรวจสอบ/สิ่งที่ต้องแก้ไข)
 
-            ### สรุปภาพรวม
-            สรุป 3 ด้านหลัก (ราคา, จำนวน, รายละเอียด)
+### สรุปภาพรวม
+สรุป 3 ด้านหลัก (ราคา, จำนวน, รายละเอียด)
 
-            คำสั่งสำคัญสำหรับการนำจุดผิดไปวาดบน PDF:
-            ที่บรรทัดท้ายสุด ให้ส่ง JSON สรุปจุดที่ผิดเพี้ยนและต้องแก้ไขจริง พร้อมระบุเลขหน้า (page เริ่มจาก 1), คำผิด (wrong), คำที่ถูกต้อง (correct), และพิกัด [ymin, xmin, ymax, xmax] (box_2d):
-            ```json
-            [
-              {
-                "page": 1,
-                "wrong": "คำ/รหัสสั้นๆ ที่ผิดใน B",
-                "correct": "คำ/รหัสสั้นๆ ที่ถูกต้องจาก A",
-                "box_2d": [ymin, xmin, ymax, xmax]
-              }
-            ]
+คำสั่งสำคัญสำหรับการนำจุดผิดไปวาดบน PDF:
+ที่บรรทัดท้ายสุด ให้ส่ง JSON สรุปจุดที่ผิดเพี้ยนและต้องแก้ไขจริง พร้อมระบุเลขหน้า (page เริ่มจาก 1), คำผิด (wrong), คำที่ถูกต้อง (correct), และพิกัด [ymin, xmin, ymax, xmax] (box_2d):
+```json
+[
+  {
+    "page": 1,
+    "wrong": "คำ/รหัสที่ผิดใน B",
+    "correct": "คำ/รหัสที่ถูกต้องจาก A",
+    "box_2d": [ymin, xmin, ymax, xmax]
+  }
+]

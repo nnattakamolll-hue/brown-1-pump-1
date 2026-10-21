@@ -17,7 +17,7 @@ st.set_page_config(
 st.title("📄 ระบบตรวจสอบและแก้ไขข้อความบนไฟล์ PDF (PO) อัตโนมัติ")
 st.caption("เปรียบเทียบไฟล์ Quotation (File A) กับ PO (File B) แบบละเอียดครบถ้วนทุกหน้า ทุกแผ่น ตามใบตั้งต้น 100%")
 
-api_key = st.text_input("🔑 กรอก Gemini API Key ของคุณที่นี่", type="password", help="วาง API Key ที่ได้มาจาก Google AI Studio ตรงนี้")
+api_key = st.text_input("กรอก Gemini API Key ของคุณที่นี่", type="password", help="วาง API Key ที่ได้มาจาก Google AI Studio ตรงนี้")
 
 st.divider()
 
@@ -141,74 +141,4 @@ def annotate_pdf_smart_search(input_pdf_bytes, corrections):
                         break
                         
         if inst and not inst.is_empty:
-            draw_sensible_red_correction(page, inst, correct_text, len(applied_logs))
-            applied_logs.append({
-                "page": target_page_idx + 1,
-                "wrong": wrong_text,
-                "correct": correct_text
-            })
-
-    output_pdf_bytes = doc.write(clean=True, deflate=True)
-    doc.close()
-    return output_pdf_bytes, applied_logs
-
-def extract_sensible_corrections(text):
-    corrections = []
-    json_matches = re.findall(r'```json\s*(.*?)\s*```', text, re.DOTALL)
-    for j_str in json_matches:
-        try:
-            parsed = json.loads(j_str)
-            if isinstance(parsed, list):
-                corrections.extend(parsed)
-        except:
-            pass
-            
-    if not corrections:
-        try:
-            match_brackets = re.search(r'\[\s*\{.*?\}\s*\]', text, re.DOTALL)
-            if match_brackets:
-                parsed = json.loads(match_brackets.group(0))
-                if isinstance(parsed, list):
-                    corrections.extend(parsed)
-        except:
-            pass
-            
-    lines = text.split('\n')
-    for line in lines:
-        if '|' in line and '---' not in line and 'รายการ' not in line:
-            cols = [c.strip() for c in line.split('|') if c.strip()]
-            if len(cols) >= 5: # รองรับคอลัมน์หน้า (Page) ด้วย
-                page_val = cols[0]
-                wrong_val = cols[3]
-                correct_val = cols[2]
-                remark = cols[4]
-                try:
-                    p_num = int(re.search(r'\d+', page_val).group())
-                except:
-                    p_num = 1
-                
-                if any(kw in remark for kw in ["ผิด", "แก้", "ไม่ตรง", "เปลี่ยน", "ต่าง", "ขาด", "หาย"]):
-                    if wrong_val and correct_val and "รายละเอียด" not in wrong_val:
-                        if not any(c.get("wrong") == wrong_val for c in corrections):
-                            corrections.append({
-                                "page": p_num,
-                                "wrong": wrong_val,
-                                "correct": correct_val
-                            })
-    return corrections
-
-st.divider()
-
-if st.button("🚀 เริ่มตรวจสอบและแก้ไขไฟล์ PDF ครบทุกหน้า ทุกแผ่น", type="primary", use_container_width=True):
-    if not api_key:
-        st.error("❌ กรุณากรอก Gemini API Key ในช่องด้านบนก่อนครับ")
-    elif not file_a or not file_b:
-        st.error("❌ กรุณาอัปโหลดไฟล์ PDF ให้ครบทั้ง 2 ไฟล์ครับ")
-    else:
-        status_box = st.status("🔍 กำลังประมวลผลตรวจสอบทุกหน้า ทุกแผ่น...", expanded=True)
-        uploaded_files = []
-        
-        try:
-            client = genai.Client(api_key=api_key)
-            
-            status_box.write("📤 กำลังส่งไฟล์
+            draw

@@ -211,27 +211,106 @@ if st.button("🚀 เริ่มตรวจสอบและแก้ไข�
             
             status_box.write("🤖 AI กำลังเปรียบเทียบหาจุดที่ข้อมูลผิดเพี้ยนจริง...")
             
-            prompt = (
-                "จงเปรียบเทียบเอกสาร B (ไฟล์ตรวจสอบ PO) กับ เอกสาร A (ไฟล์ตั้งต้น Quotation) อย่างละเอียดทุกหน้า\n\n"
-                "หลักการตรวจอย่างสมเหตุสมผล:\n"
-                "1. ตรวจสอบเฉพาะจุดที่ 'ข้อมูลผิดเพี้ยน/ไม่ตรงกัน' จริงๆ เท่านั้น (เช่น รหัสสินค้าผิด, ตัวเลขราคาผิด, จำนวนไม่เท่ากัน)\n"
-                "2. หากเอกสาร B มีการย่อข้อความธรรมดา แต่สเปกและรหัสหลักถูกต้อง ให้ถือว่าผ่าน (ไม่ต้องแก้ไข)\n"
-                "3. หากข้อมูลผิด ให้ระบุรหัสหรือคำสั้นๆ ที่ผิดจริงใน B เป็น \"wrong\" และระบุรหัสหรือคำที่ถูกต้องจาก A เป็น \"correct\" เพื่อนำไปวาดขีดฆ่าแก้ไข\n\n"
-                "รูปแบบรายงานสรุป:\n"
-                "### ตารางเปรียบเทียบและผลการตรวจสอบ\n"
-                "แสดงผลเป็นตาราง Markdown 4 คอลัมน์หลัก (รายการ/รหัสสินค้า, รายละเอียดใน A (ถูกต้อง), รายละเอียดใน B (ที่ผิด), ผลการตรวจสอบ/สิ่งที่ต้องแก้ไข)\n\n"
-                "### สรุปภาพรวม\n"
-                "สรุป 3 ด้านหลัก (ราคา, จำนวน, รายละเอียด)\n\n"
-                "คำสั่งสำคัญสำหรับการนำจุดผิดไปวาดบน PDF:\n"
-                "ที่บรรทัดท้ายสุด ให้ส่ง JSON สรุปจุดที่ผิดเพี้ยนและต้องแก้ไขจริง พร้อมระบุเลขหน้า (page เริ่มจาก 1), คำผิด (wrong), คำที่ถูกต้อง (correct), และพิกัด [ymin, xmin, ymax, xmax] (box_2d):\n"
-                "```json\n"
-                "[\n"
-                "  {\n"
-                "    \"page\": 1,\n"
-                "    \"wrong\": \"คำ/รหัสที่ผิดใน B\",\n"
-                "    \"correct\": \"คำ/รหัสที่ถูกต้องจาก A\",\n"
-                "    \"box_2d\": [ymin, xmin, ymax, xmax]\n"
-                "  }\n"
-                "]\n"
-                "```\n"
-                "ห้ามใช้แท็ก HTML
+            prompt = '''จงเปรียบเทียบเอกสาร B (ไฟล์ตรวจสอบ PO) กับ เอกสาร A (ไฟล์ตั้งต้น Quotation) อย่างละเอียดทุกหน้า
+
+หลักการตรวจอย่างสมเหตุสมผล:
+1. ตรวจสอบเฉพาะจุดที่ 'ข้อมูลผิดเพี้ยน/ไม่ตรงกัน' จริงๆ เท่านั้น (เช่น รหัสสินค้าผิด, ตัวเลขราคาผิด, จำนวนไม่เท่ากัน)
+2. หากเอกสาร B มีการย่อข้อความธรรมดา แต่สเปกและรหัสหลักถูกต้อง ให้ถือว่าผ่าน (ไม่ต้องแก้ไข)
+3. หากข้อมูลผิด ให้ระบุรหัสหรือคำสั้นๆ ที่ผิดจริงใน B เป็น "wrong" และระบุรหัสหรือคำที่ถูกต้องจาก A เป็น "correct" เพื่อนำไปวาดขีดฆ่าแก้ไข
+
+รูปแบบรายงานสรุป:
+### ตารางเปรียบเทียบและผลการตรวจสอบ
+แสดงผลเป็นตาราง Markdown 4 คอลัมน์หลัก (รายการ/รหัสสินค้า, รายละเอียดใน A (ถูกต้อง), รายละเอียดใน B (ที่ผิด), ผลการตรวจสอบ/สิ่งที่ต้องแก้ไข)
+
+### สรุปภาพรวม
+สรุป 3 ด้านหลัก (ราคา, จำนวน, รายละเอียด)
+
+คำสั่งสำคัญสำหรับการนำจุดผิดไปวาดบน PDF:
+ที่บรรทัดท้ายสุด ให้ส่ง JSON สรุปจุดที่ผิดเพี้ยนและต้องแก้ไขจริง พร้อมระบุเลขหน้า (page เริ่มจาก 1), คำผิด (wrong), คำที่ถูกต้อง (correct), และพิกัด [ymin, xmin, ymax, xmax] (box_2d):
+```json
+[
+  {
+    "page": 1,
+    "wrong": "คำ/รหัสที่ผิดใน B",
+    "correct": "คำ/รหัสที่ถูกต้องจาก A",
+    "box_2d": [ymin, xmin, ymax, xmax]
+  }
+]
+```'''
+            
+            max_retries = 5
+            retry_delay = 5
+            response = None
+            success = False
+            
+            config = types.GenerateContentConfig(
+                max_output_tokens=8192,
+                temperature=0.1
+            )
+            
+            for attempt in range(max_retries):
+                try:
+                    status_box.write(f"🔄 กำลังวิเคราะห์ข้อมูล (พยายามครั้งที่ {attempt+1}/{max_retries})...")
+                    response = client.models.generate_content(
+                        model='gemini-3.8-flash',
+                        contents=[g_a, g_b, prompt],
+                        config=config
+                    )
+                    success = True
+                    break
+                except Exception as api_err:
+                    if ("503" in str(api_err) or "UNAVAILABLE" in str(api_err)) and attempt < max_retries - 1:
+                        status_box.warning(f"⚠️ เซิร์ฟเวอร์หนาแน่น กำลังลองใหม่ในอีก {retry_delay} วินาที...")
+                        time.sleep(retry_delay)
+                        retry_delay += 3
+                    else:
+                        raise api_err
+            
+            if not success or not response:
+                raise Exception("เซิร์ฟเวอร์หนาแน่นเกินไป โปรดลองกดปุ่มเริ่มตรวจสอบใหม่อีกครั้ง")
+            
+            clean_output = response.text.replace("<br>", " ").replace("<br/>", " ").replace("<BR>", " ")
+            
+            status_box.write("⚙️ กำลังวาดขีดฆ่าเฉพาะจุดที่ผิดและฝังคำแก้ลงในไฟล์ PDF...")
+            
+            corrections_list = extract_sensible_corrections(response.text)
+            file_b.seek(0)
+            pdf_bytes = file_b.read()
+            annotated_pdf_bytes, applied_logs = annotate_pdf_smart_search(pdf_bytes, corrections_list)
+            
+            status_box.update(label=f"✅ ตรวจสอบและแก้ไขเรียบร้อย! (วาดจุดที่ผิดจริงลง PDF ไปทั้งหมด {len(applied_logs)} จุด)", state="complete", expanded=False)
+            
+            st.markdown(clean_output)
+            
+            with st.expander("🔍 ตรวจสอบรายการจุดแก้ไขทั้งหมดที่ฝังลงบน PDF"):
+                st.write("รายการจุดแก้ไขที่พบและดึงได้:", corrections_list)
+                st.write("รายการที่ทำการวาดลงไฟล์ PDF สำเร็จจริง:", applied_logs)
+            
+            st.divider()
+            col_dl1, col_dl2 = st.columns(2)
+            with col_dl1:
+                st.download_button(
+                    label="📥 ดาวน์โหลดรายงานผลสรุป (.txt)",
+                    data=clean_output,
+                    file_name="po_audit_report.txt",
+                    mime="text/plain"
+                )
+            with col_dl2:
+                st.download_button(
+                    label=f"📥 ดาวน์โหลดไฟล์ PDF ที่แก้ไขจุดผิดแล้ว ({len(applied_logs)} จุด) (.pdf)",
+                    data=annotated_pdf_bytes,
+                    file_name="annotated_po_document.pdf",
+                    mime="application/pdf"
+                )
+
+        except Exception as e:
+            status_box.update(label="❌ เกิดข้อผิดพลาดในการประมวลผล", state="error", expanded=True)
+            st.error(f"รายละเอียด: {str(e)}")
+            
+        finally:
+            if uploaded_files and 'client' in locals():
+                for name in uploaded_files:
+                    try:
+                        client.files.delete(name=name)
+                    except:
+                        pass

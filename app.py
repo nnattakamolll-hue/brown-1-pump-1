@@ -15,7 +15,7 @@ st.set_page_config(
 )
 
 st.title("📄 ระบบตรวจสอบและแก้ไขข้อความบนไฟล์ PDF (PO) อัตโนมัติ")
-st.caption("เปรียบเทียบไฟล์ Quotation (File A) กับ PO (File B) กรองรายการซ้ำ และจัดระเบียบกล่องข้อความไม่ให้ทับซ้อนกัน")
+st.caption("เปรียบเทียบไฟล์ Quotation (File A) กับ PO (File B) รองรับภาษาไทย ค้นหาพิกัดแม่นยำ และแก้ไขลง PDF จริง")
 
 api_key = st.text_input("กรอก Gemini API Key ของคุณที่นี่", type="password", help="วาง API Key ที่ได้มาจาก Google AI Studio ตรงนี้")
 
@@ -44,13 +44,10 @@ def upload_to_gemini(client, uploaded_file):
     return g_file
 
 def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
-    """
-    ระบบวาดเส้นขีดฆ่าและกล่องข้อความแบบไม่ทับซ้อนกัน พร้อมกรองรายการซ้ำอัตโนมัติ
-    """
     doc = fitz.open(stream=input_pdf_bytes, filetype="pdf")
     applied_logs = []
     
-    # 1. กรองรายการที่ซ้ำกันออก (Deduplication)
+    # 1. กรองรายการที่ซ้ำกันออก
     unique_corrections = []
     seen = set()
     for item in corrections:
@@ -66,7 +63,7 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
             seen.add(key)
             unique_corrections.append(item)
 
-    # 2. จัดกลุ่มรายการตามหน้า PDF เพื่อบริหารจัดการพื้นที่แนวตั้ง
+    # 2. จัดกลุ่มรายการตามหน้า PDF
     page_corrections = {}
     for item in unique_corrections:
         wrong_text = str(item.get("wrong", "")).strip()
@@ -78,13 +75,13 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
         page = doc[target_page_idx]
         
         inst = None
-        # ใช้พิกัด box_2d ถ้ามี
+        # วิธีที่ 1: ใช้พิกัด box_2d ถ้ามี
         if box_2d and len(box_2d) == 4:
             ymin, xmin, ymax, xmax = box_2d
             w, h = page.rect.width, page.rect.height
             inst = fitz.Rect(xmin * w / 1000.0, ymin * h / 1000.0, xmax * w / 1000.0, ymax * h / 1000.0)
             
-        # ค้นหาด้วยข้อความตรงตัว
+        # วิธีที่ 2: ค้นหาข้อความแบบตรงตัว (Exact Search)
         if not inst or inst.is_empty:
             text_instances = page.search_for(wrong_text)
             if text_instances:
@@ -98,36 +95,33 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
                         inst = found[0]
                         break
                         
-        # ค้นหาด้วย Keyword ย่อยถ้ายังไม่เจอ
+        # วิธีที่ 3: Smart Keyword Matching (รองรับทั้งภาษาไทยและอังกฤษด้วย \w+)
         if not inst or inst.is_empty:
-            keywords = re.findall(r'[A-Za-z0-9\-\/\.]+', wrong_text)
+            keywords = [w for w in re.findall(r'\w+', wrong_text) if len(w) >= 2]
             keywords.sort(key=len, reverse=True)
             for kw in keywords:
-                if len(kw) >= 3:
-                    for p_idx, p in enumerate(doc):
-                        found = p.search_for(kw)
-                        if found:
-                            page = p
-                            target_page_idx = p_idx
-                            inst = found[0]
-                            break
-                    if inst and not inst.is_empty:
+                for p_idx, p in enumerate(doc):
+                    found = p.search_for(kw)
+                    if found:
+                        page = p
+                        target_page_idx = p_idx
+                        inst = found[0]
                         break
+                if inst and not inst.is_empty:
+                    break
                         
         if inst and not inst.is_empty:
             if target_page_idx not in page_corrections:
                 page_corrections[target_page_idx] = []
             page_corrections[target_page_idx].append({
                 "inst": inst,
-                "page_obj": page,
                 "wrong": wrong_text,
                 "correct": correct_text
             })
 
-    # 3. วาดลง PDF โดยเรียงลำดับตามแนวตั้งและป้องกันกล่องทับซ้อนกัน
+    # 3. วาดลง PDF เรียงลำดับจากบนลงล่าง ป้องกันกล่องซ้อนทับกัน
     for p_idx, items in page_corrections.items():
         page = doc[p_idx]
-        # เรียงลำดับรายการจากบนลงล่างตามพิกัด y0
         items.sort(key=lambda x: x["inst"].y0)
         
         last_box_bottom = 0
@@ -146,12 +140,10 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
                 width=1.8
             )
             
-            # คำนวณขนาดกล่องข้อความ
             box_h = 18
             box_w = max(len(correct_text) * 7.5, 110)
             box_x0 = inst.x1 + 10
             
-            # จัดตำแหน่งแนวตั้งไม่ให้ทับกับกล่องก่อนหน้า
             box_y0 = inst.y0
             if box_y0 < last_box_bottom + 4:
                 box_y0 = last_box_bottom + 4
@@ -261,7 +253,7 @@ if st.button("เริ่มตรวจสอบและแก้ไขไฟ
             g_b = upload_to_gemini(client, file_b)
             uploaded_files.append(g_b.name)
             
-            status_box.write("AI กำลังสแกนตรวจเทียบเอกสารทุกหน้า แบบจัดระเบียบและคัดกรองรายการซ้ำ...")
+            status_box.write("AI กำลังสแกนตรวจเทียบเอกสารทุกหน้า ค้นหาคำผิดทั้งไทยและอังกฤษ...")
             
             prompt = '''จงเปรียบเทียบเอกสาร B (ไฟล์ตรวจสอบ PO) กับ เอกสาร A (ไฟล์ตั้งต้น Quotation) อย่างละเอียดทุกหน้า ทุกแผ่น
 
@@ -334,7 +326,7 @@ if st.button("เริ่มตรวจสอบและแก้ไขไฟ
             pdf_bytes = file_b.read()
             annotated_pdf_bytes, applied_logs = annotate_pdf_anti_overlap(pdf_bytes, corrections_list)
             
-            status_box.update(label=f"ตรวจสอบและแก้ไขเรียบร้อย! (กรองซ้ำและจัดระเบียบวาดลง PDF ไปทั้งหมด {len(applied_logs)} จุด)", state="complete", expanded=False)
+            status_box.update(label=f"ตรวจสอบและแก้ไขเรียบร้อย! (วาดลง PDF ไปทั้งหมด {len(applied_logs)} จุด)", state="complete", expanded=False)
             
             st.markdown(clean_output)
             
@@ -353,7 +345,7 @@ if st.button("เริ่มตรวจสอบและแก้ไขไฟ
                 )
             with col_dl2:
                 st.download_button(
-                    label=f"ดาวน์โหลดไฟล์ PDF ที่จัดระเบียบแก้ไขแล้ว ({len(applied_logs)} จุด) (.pdf)",
+                    label=f"ดาวน์โหลดไฟล์ PDF ที่แก้ไขแล้ว ({len(applied_logs)} จุด) (.pdf)",
                     data=annotated_pdf_bytes,
                     file_name="annotated_po_document.pdf",
                     mime="application/pdf"

@@ -15,7 +15,7 @@ st.set_page_config(
 )
 
 st.title("📄 ระบบตรวจสอบและแก้ไขข้อความบนไฟล์ PDF (PO) อัตโนมัติ")
-st.caption("เปรียบเทียบไฟล์ Quotation (File A) กับ PO (File B) รองรับภาษาไทย ค้นหาพิกัดแม่นยำ และแก้ไขลง PDF จริง")
+st.caption("เปรียบเทียบไฟล์ Quotation (File A) กับ PO (File B) ยึดใบตั้งต้นเป็นหลัก 100% และแก้ไขลง PDF จริงอย่างแม่นยำ")
 
 api_key = st.text_input("กรอก Gemini API Key ของคุณที่นี่", type="password", help="วาง API Key ที่ได้มาจาก Google AI Studio ตรงนี้")
 
@@ -95,7 +95,7 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
                         inst = found[0]
                         break
                         
-        # วิธีที่ 3: Smart Keyword Matching (รองรับทั้งภาษาไทยและอังกฤษด้วย \w+)
+        # วิธีที่ 3: Smart Keyword Matching (รองรับทั้งภาษาไทยและอังกฤษ)
         if not inst or inst.is_empty:
             keywords = [w for w in re.findall(r'\w+', wrong_text) if len(w) >= 2]
             keywords.sort(key=len, reverse=True)
@@ -190,6 +190,8 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
 
 def extract_sensible_corrections(text):
     corrections = []
+    
+    # 1. ดึงจาก JSON Block
     json_matches = re.findall(r'```json\s*(.*?)\s*```', text, re.DOTALL)
     for j_str in json_matches:
         try:
@@ -209,24 +211,21 @@ def extract_sensible_corrections(text):
         except:
             pass
             
+    # 2. Fallback: ดึงจากตาราง Markdown ทุกรูปแบบอัตโนมัติ (ไม่จำกัดจำนวนคอลัมน์)
     lines = text.split('\n')
     for line in lines:
         if '|' in line and '---' not in line and 'รายการ' not in line:
             cols = [c.strip() for c in line.split('|') if c.strip()]
-            if len(cols) >= 5:
-                page_val = cols[0]
-                wrong_val = cols[3]
-                correct_val = cols[2]
-                remark = cols[4]
-                try:
-                    p_num = int(re.search(r'\d+', page_val).group())
-                except:
-                    p_num = 1
+            if len(cols) >= 3:
+                # เลือกคอลัมน์รองสุดท้ายเป็น wrong และคอลัมน์ก่อนหน้าเป็น correct
+                correct_val = cols[-3] if len(cols) >= 4 else cols[0]
+                wrong_val = cols[-2] if len(cols) >= 4 else cols[1]
+                remark = cols[-1]
                 
-                if any(kw in remark for kw in ["ผิด", "แก้", "ไม่ตรง", "เปลี่ยน", "ต่าง", "ขาด", "หาย"]):
+                if any(kw in remark for kw in ["ผิด", "แก้", "ไม่ตรง", "เปลี่ยน", "ต่าง", "ขาด", "หาย", "ตกหล่น"]):
                     if wrong_val and correct_val and "รายละเอียด" not in wrong_val:
                         corrections.append({
-                            "page": p_num,
+                            "page": 1,
                             "wrong": wrong_val,
                             "correct": correct_val
                         })
@@ -253,7 +252,7 @@ if st.button("เริ่มตรวจสอบและแก้ไขไฟ
             g_b = upload_to_gemini(client, file_b)
             uploaded_files.append(g_b.name)
             
-            status_box.write("AI กำลังสแกนตรวจเทียบเอกสารทุกหน้า ค้นหาคำผิดทั้งไทยและอังกฤษ...")
+            status_box.write("AI กำลังสแกนตรวจเทียบเอกสารทุกหน้า ค้นหาคำผิดและดึงพิกัดมาแก้ไข...")
             
             prompt = '''จงเปรียบเทียบเอกสาร B (ไฟล์ตรวจสอบ PO) กับ เอกสาร A (ไฟล์ตั้งต้น Quotation) อย่างละเอียดทุกหน้า ทุกแผ่น
 
@@ -263,25 +262,20 @@ if st.button("เริ่มตรวจสอบและแก้ไขไฟ
 3. ห้ามแสดงรายการซ้ำซ้อนกัน ให้สรุปรายการที่ผิดพลาดแบบไม่ซ้ำกันอย่างเป็นระเบียบ
 
 รูปแบบรายงานสรุป:
-### ตารางเปรียบเทียบและผลการตรวจสอบ (จัดระเบียบเรียบร้อย)
-แสดงผลเป็นตาราง Markdown 5 คอลัมน์หลัก:
-1. หน้าที่พบ (Page)
-2. รายการ / รหัสสินค้า
-3. รายละเอียดใน A (ถูกต้อง)
-4. รายละเอียดใน B (ที่ผิด/ตกหล่น)
-5. ผลการตรวจสอบ / สิ่งที่ต้องแก้ไข
+### ตารางเปรียบเทียบและผลการตรวจสอบ
+แสดงผลเป็นตาราง Markdown สรุปรายละเอียดรายการที่ผิดพลาด
 
 ### สรุปภาพรวม
 สรุปภาพรวมการตรวจสอบ
 
-คำสั่งสำคัญสำหรับการนำจุดผิดไปวาดบน PDF:
-ที่บรรทัดท้ายสุด ให้ส่ง JSON สรุปจุดที่ผิดเพี้ยนและต้องแก้ไขจริงแบบไม่ซ้ำกัน พร้อมระบุเลขหน้า (page เริ่มจาก 1), คำผิด (wrong), คำที่ถูกต้อง (correct):
+คำสั่งสำคัญมากสำหรับการนำจุดผิดไปวาดบน PDF:
+ที่บรรทัดท้ายสุด ให้ส่ง JSON บล็อกเดียวเท่านั้น สรุปจุดที่ผิดเพี้ยนและต้องแก้ไขจริงแบบไม่ซ้ำกัน พร้อมระบุเลขหน้า (page เริ่มจาก 1), คำ/รหัสที่ผิดใน B (wrong), และคำที่ถูกต้องจาก A (correct):
 ```json
 [
   {
     "page": 1,
-    "wrong": "คำ/รหัสที่ผิดใน B",
-    "correct": "คำ/รหัสที่ถูกต้องจาก A"
+    "wrong": "คำหรือรหัสที่ผิดใน B",
+    "correct": "คำหรือรหัสที่ถูกต้องจาก A"
   }
 ]
 ```'''
@@ -319,7 +313,7 @@ if st.button("เริ่มตรวจสอบและแก้ไขไฟ
             
             clean_output = response.text.replace("<br>", " ").replace("<br/>", " ").replace("<BR>", " ")
             
-            status_box.write("กำลังวาดขีดฆ่าและจัดระเบียบกล่องข้อความบน PDF ไม่ให้ทับซ้อนกัน...")
+            status_box.write("กำลังวาดขีดฆ่าและจัดระเบียบกล่องข้อความลงบนไฟล์ PDF จริง...")
             
             corrections_list = extract_sensible_corrections(response.text)
             file_b.seek(0)

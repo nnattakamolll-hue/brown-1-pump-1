@@ -63,47 +63,44 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
             seen.add(key)
             unique_corrections.append(item)
 
-    # 2. จัดกลุ่มรายการตามหน้า PDF
+    # 2. จัดกลุ่มรายการตามหน้า PDF พร้อมระบบแกะพิกัด Box 2D จาก AI
     page_corrections = {}
     for item in unique_corrections:
         wrong_text = str(item.get("wrong", "")).strip()
         correct_text = str(item.get("correct", "")).strip()
         page_hint = int(item.get("page", 1)) - 1
+        box_2d = item.get("box_2d")
         
         target_page_idx = page_hint if (0 <= page_hint < len(doc)) else 0
         page = doc[target_page_idx]
         
         inst = None
         
-        # วิธีที่ 1: ค้นหาแบบตรงตัวบนหน้าที่ระบุ (Exact Match)
-        text_instances = page.search_for(wrong_text)
-        if text_instances:
-            inst = text_instances[0]
+        # วิธีที่ 1 (แม่นยำที่สุด): ใช้พิกัด box_2d ที่ AI สแกนภาพเจอโดยตรง
+        if box_2d and isinstance(box_2d, list) and len(box_2d) == 4:
+            ymin, xmin, ymax, xmax = box_2d
+            w, h = page.rect.width, page.rect.height
+            inst = fitz.Rect(xmin * w / 1000.0, ymin * h / 1000.0, xmax * w / 1000.0, ymax * h / 1000.0)
             
-        # วิธีที่ 2: ถ้าไม่เจอ ลองค้นหาแบบไม่สนตัวพิมพ์เล็ก-ใหญ่ หรือกวาดหาทุกหน้า
-        if not inst or inst.is_empty:
-            for p_idx, p in enumerate(doc):
-                found = p.search_for(wrong_text)
-                if found:
-                    page = p
-                    target_page_idx = p_idx
-                    inst = found[0]
-                    break
-                    
-        # วิธีที่ 3: แตกคำสำคัญ (Token Matching) ค้นหารหัสหรือตัวเลขสำคัญ
+        # วิธีที่ 2: ถ้าไม่มีพิกัด ให้ค้นหาจากคำสำคัญหลักในหน้ากระดาษ
         if not inst or inst.is_empty:
             tokens = [w for w in re.findall(r'[A-Za-z0-9ก-ฮะ-์]+', wrong_text) if len(w) >= 2]
             tokens.sort(key=lambda x: (any(char.isdigit() for char in x), len(x)), reverse=True)
             
             for token in tokens:
-                for p_idx, p in enumerate(doc):
-                    found = p.search_for(token)
-                    if found:
-                        page = p
-                        target_page_idx = p_idx
-                        inst = found[0]
-                        break
-                if inst and not inst.is_empty:
+                found = page.search_for(token)
+                if found:
+                    inst = found[0]
+                    break
+                    
+        # วิธีที่ 3: กวาดหาทั่วทุกหน้าถ้ายังไม่เจอ
+        if not inst or inst.is_empty:
+            for p_idx, p in enumerate(doc):
+                found = p.search_for(wrong_text[:10] if len(wrong_text) > 10 else wrong_text)
+                if found:
+                    page = p
+                    target_page_idx = p_idx
+                    inst = found[0]
                     break
                         
         if inst and not inst.is_empty:
@@ -230,7 +227,7 @@ if st.button("เริ่มตรวจสอบและแก้ไขไฟ
             g_b = upload_to_gemini(client, file_b)
             uploaded_files.append(g_b.name)
             
-            status_box.write("AI กำลังสแกนตรวจเทียบเอกสาร ค้นหาคำผิดและดึงพิกัดมามาร์คลง PDF...")
+            status_box.write("AI กำลังสแกนตรวจเทียบเอกสาร หาพิกัดตำแหน่ง และมาร์คแก้ไขลง PDF...")
             
             prompt = '''จงเปรียบเทียบเอกสาร B (ไฟล์ตรวจสอบ PO) กับ เอกสาร A (ไฟล์ตั้งต้น Quotation) อย่างละเอียดทุกหน้า ทุกแผ่น
 
@@ -247,13 +244,14 @@ if st.button("เริ่มตรวจสอบและแก้ไขไฟ
 สรุปภาพรวมการตรวจสอบ
 
 คำสั่งสำคัญมากสำหรับการนำจุดผิดไปวาดบน PDF:
-ที่บรรทัดท้ายสุด ให้ส่ง JSON บล็อกเดียวเท่านั้น สรุปจุดที่ผิดเพี้ยนและต้องแก้ไขจริงแบบไม่ซ้ำกัน พร้อมระบุเลขหน้า (page เริ่มจาก 1), คำ/รหัสที่ผิดใน B (wrong), และคำที่ถูกต้องจาก A (correct):
+ที่บรรทัดท้ายสุด ให้ส่ง JSON บล็อกเดียวเท่านั้น สรุปจุดที่ผิดเพี้ยนและต้องแก้ไขจริงแบบไม่ซ้ำกัน พร้อมระบุเลขหน้า (page เริ่มจาก 1), คำที่ผิดใน B (wrong), คำที่ถูกต้องจาก A (correct), และพิกัดตำแหน่งคร่าวๆ บนหน้ากระดาษ [ymin, xmin, ymax, xmax] (สเกล 0 ถึง 1000 ใน `box_2d`):
 ```json
 [
   {
     "page": 2,
-    "wrong": "with motor 15 kW (20 HP)",
-    "correct": "with IE3 Brake motor 15 kW (20 HP)"
+    "wrong": "คำหรือรหัสที่ผิดใน B",
+    "correct": "คำหรือรหัสที่ถูกต้องจาก A",
+    "box_2d": [ymin, xmin, ymax, xmax]
   }
 ]
 ```'''

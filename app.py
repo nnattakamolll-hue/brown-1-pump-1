@@ -69,39 +69,35 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
         wrong_text = str(item.get("wrong", "")).strip()
         correct_text = str(item.get("correct", "")).strip()
         page_hint = int(item.get("page", 1)) - 1
-        box_2d = item.get("box_2d")
         
         target_page_idx = page_hint if (0 <= page_hint < len(doc)) else 0
         page = doc[target_page_idx]
         
         inst = None
-        # วิธีที่ 1: ใช้พิกัด box_2d ถ้ามี
-        if box_2d and len(box_2d) == 4:
-            ymin, xmin, ymax, xmax = box_2d
-            w, h = page.rect.width, page.rect.height
-            inst = fitz.Rect(xmin * w / 1000.0, ymin * h / 1000.0, xmax * w / 1000.0, ymax * h / 1000.0)
+        
+        # วิธีที่ 1: ค้นหาแบบตรงตัวบนหน้าที่ระบุ (Exact Match)
+        text_instances = page.search_for(wrong_text)
+        if text_instances:
+            inst = text_instances[0]
             
-        # วิธีที่ 2: ค้นหาข้อความแบบตรงตัว (Exact Search)
+        # วิธีที่ 2: ถ้าไม่เจอ ลองค้นหาแบบไม่สนตัวพิมพ์เล็ก-ใหญ่ หรือกวาดหาทุกหน้า
         if not inst or inst.is_empty:
-            text_instances = page.search_for(wrong_text)
-            if text_instances:
-                inst = text_instances[0]
-            else:
-                for p_idx, p in enumerate(doc):
-                    found = p.search_for(wrong_text)
-                    if found:
-                        page = p
-                        target_page_idx = p_idx
-                        inst = found[0]
-                        break
-                        
-        # วิธีที่ 3: Smart Keyword Matching (รองรับทั้งภาษาไทยและอังกฤษ)
+            for p_idx, p in enumerate(doc):
+                found = p.search_for(wrong_text)
+                if found:
+                    page = p
+                    target_page_idx = p_idx
+                    inst = found[0]
+                    break
+                    
+        # วิธีที่ 3: แตกคำสำคัญ (Token Matching) ค้นหารหัสหรือตัวเลขสำคัญ
         if not inst or inst.is_empty:
-            keywords = [w for w in re.findall(r'\w+', wrong_text) if len(w) >= 2]
-            keywords.sort(key=len, reverse=True)
-            for kw in keywords:
+            tokens = [w for w in re.findall(r'[A-Za-z0-9ก-ฮะ-์]+', wrong_text) if len(w) >= 2]
+            tokens.sort(key=lambda x: (any(char.isdigit() for char in x), len(x)), reverse=True)
+            
+            for token in tokens:
                 for p_idx, p in enumerate(doc):
-                    found = p.search_for(kw)
+                    found = p.search_for(token)
                     if found:
                         page = p
                         target_page_idx = p_idx
@@ -191,7 +187,7 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
 def extract_sensible_corrections(text):
     corrections = []
     
-    # 1. ดึงจาก JSON Block
+    # ดึงข้อมูลจาก JSON Block ที่ AI ส่งมาให้อย่างแม่นยำที่สุด
     json_matches = re.findall(r'```json\s*(.*?)\s*```', text, re.DOTALL)
     for j_str in json_matches:
         try:
@@ -211,24 +207,6 @@ def extract_sensible_corrections(text):
         except:
             pass
             
-    # 2. Fallback: ดึงจากตาราง Markdown ทุกรูปแบบอัตโนมัติ (ไม่จำกัดจำนวนคอลัมน์)
-    lines = text.split('\n')
-    for line in lines:
-        if '|' in line and '---' not in line and 'รายการ' not in line:
-            cols = [c.strip() for c in line.split('|') if c.strip()]
-            if len(cols) >= 3:
-                # เลือกคอลัมน์รองสุดท้ายเป็น wrong และคอลัมน์ก่อนหน้าเป็น correct
-                correct_val = cols[-3] if len(cols) >= 4 else cols[0]
-                wrong_val = cols[-2] if len(cols) >= 4 else cols[1]
-                remark = cols[-1]
-                
-                if any(kw in remark for kw in ["ผิด", "แก้", "ไม่ตรง", "เปลี่ยน", "ต่าง", "ขาด", "หาย", "ตกหล่น"]):
-                    if wrong_val and correct_val and "รายละเอียด" not in wrong_val:
-                        corrections.append({
-                            "page": 1,
-                            "wrong": wrong_val,
-                            "correct": correct_val
-                        })
     return corrections
 
 st.divider()
@@ -252,7 +230,7 @@ if st.button("เริ่มตรวจสอบและแก้ไขไฟ
             g_b = upload_to_gemini(client, file_b)
             uploaded_files.append(g_b.name)
             
-            status_box.write("AI กำลังสแกนตรวจเทียบเอกสารทุกหน้า ค้นหาคำผิดและดึงพิกัดมาแก้ไข...")
+            status_box.write("AI กำลังสแกนตรวจเทียบเอกสาร ค้นหาคำผิดและดึงพิกัดมามาร์คลง PDF...")
             
             prompt = '''จงเปรียบเทียบเอกสาร B (ไฟล์ตรวจสอบ PO) กับ เอกสาร A (ไฟล์ตั้งต้น Quotation) อย่างละเอียดทุกหน้า ทุกแผ่น
 
@@ -273,9 +251,9 @@ if st.button("เริ่มตรวจสอบและแก้ไขไฟ
 ```json
 [
   {
-    "page": 1,
-    "wrong": "คำหรือรหัสที่ผิดใน B",
-    "correct": "คำหรือรหัสที่ถูกต้องจาก A"
+    "page": 2,
+    "wrong": "with motor 15 kW (20 HP)",
+    "correct": "with IE3 Brake motor 15 kW (20 HP)"
   }
 ]
 ```'''

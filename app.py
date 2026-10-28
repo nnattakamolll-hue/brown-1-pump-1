@@ -258,7 +258,7 @@ if st.button("เริ่มตรวจสอบและแก้ไขไฟ
                 try:
                     status_box.write(f"กำลังวิเคราะห์ข้อมูล (พยายามครั้งที่ {attempt+1}/{max_retries})...")
                     response = client.models.generate_content(
-                        model='gemini-2.5-flash',  # เปลี่ยนมาใช้รุ่นนี้เพื่อหลีกเลี่ยงอาการ 503 Service Unavailable
+                        model='gemini-3.8-flash',  # ใช้รุ่น gemini-3.8-flash ตามที่ API แนะนำ
                         contents=[g_a, g_b, prompt],
                         config=config
                     )
@@ -289,34 +289,4 @@ if st.button("เริ่มตรวจสอบและแก้ไขไฟ
             st.markdown(clean_output)
             
             with st.expander("ตรวจสอบรายการจุดแก้ไขทั้งหมดที่ฝังลงบน PDF"):
-                st.write("รายการจุดแก้ไขที่ไม่ซ้ำกัน:", corrections_list)
-                st.write("รายการที่ทำการวาดลงไฟล์ PDF สำเร็จจริง:", applied_logs)
-            
-            st.divider()
-            col_dl1, col_dl2 = st.columns(2)
-            with col_dl1:
-                st.download_button(
-                    label="ดาวน์โหลดรายงานผลสรุป (.txt)",
-                    data=clean_output,
-                    file_name="po_audit_report.txt",
-                    mime="text/plain"
-                )
-            with col_dl2:
-                st.download_button(
-                    label=f"ดาวน์โหลดไฟล์ PDF ที่แก้ไขแล้ว ({len(applied_logs)} จุด) (.pdf)",
-                    data=annotated_pdf_bytes,
-                    file_name="annotated_po_document.pdf",
-                    mime="application/pdf"
-                )
-
-        except Exception as e:
-            status_box.update(label="เกิดข้อผิดพลาดในการประมวลผล", state="error", expanded=True)
-            st.error(f"รายละเอียด: {str(e)}")
-            
-        finally:
-            if uploaded_files and 'client' in locals():
-                for name in uploaded_files:
-                    try:
-                        client.files.delete(name=name)
-                    except:
-                        pass
+                st.write

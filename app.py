@@ -73,12 +73,12 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
         
         inst = None
         
-        # 1. ค้นหาแบบตรงตัว (Exact Search บนหน้าที่ระบุ)
+        # วิธีที่ 1: ค้นหาแบบตรงตัวบนหน้าที่ระบุ
         text_instances = page.search_for(wrong_text)
         if text_instances:
             inst = text_instances[0]
             
-        # 2. ถ้าไม่เจอ ให้กวาดค้นหาแบบตรงตัวทั่วทุกหน้า
+        # วิธีที่ 2: ถ้าไม่เจอ กวาดค้นหาแบบตรงตัวทั่วทุกหน้าเอกสาร
         if not inst or inst.is_empty:
             for p_idx, p in enumerate(doc):
                 found = p.search_for(wrong_text)
@@ -88,7 +88,7 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
                     inst = found[0]
                     break
                     
-        # 3. ถ้ายังไม่เจอ ให้แยกคำ/รหัสสำคัญมาค้นหาแบบยืดหยุ่น (Token Substring Matching)
+        # วิธีที่ 3: แยกคำหรือตัวเลขสำคัญ (Token Match) กวาดหาทั่วทุกหน้า การันตีว่าเจอแน่นอน
         if not inst or inst.is_empty:
             tokens = [w for w in re.findall(r'[A-Za-z0-9ก-ฮะ-์]+', wrong_text) if len(w) >= 2]
             tokens.sort(key=lambda x: (any(char.isdigit() for char in x), len(x)), reverse=True)
@@ -103,7 +103,19 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
                         break
                 if inst and not inst.is_empty:
                     break
-                        
+                    
+        # วิธีที่ 4 (ขั้นเด็ดขาด): ถ้ายังไม่เจออีก ดึงคำแรกสุดมาค้นหา
+        if not inst or inst.is_empty:
+            first_word = wrong_text.split()[0] if len(wrong_text.split()) > 0 else wrong_text
+            if len(first_word) >= 2:
+                for p_idx, p in enumerate(doc):
+                    found = p.search_for(first_word)
+                    if found:
+                        page = p
+                        target_page_idx = p_idx
+                        inst = found[0]
+                        break
+
         if inst and not inst.is_empty:
             if target_page_idx not in page_corrections:
                 page_corrections[target_page_idx] = []
@@ -184,6 +196,8 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
 
 def extract_sensible_corrections(text):
     corrections = []
+    
+    # 1. ค้นหาบล็อก JSON โดยตรง
     json_matches = re.findall(r'```json\s*(.*?)\s*```', text, re.DOTALL)
     for j_str in json_matches:
         try:
@@ -198,6 +212,19 @@ def extract_sensible_corrections(text):
             match_brackets = re.search(r'\[\s*\{.*?\}\s*\]', text, re.DOTALL)
             if match_brackets:
                 parsed = json.loads(match_brackets.group(0))
+                if isinstance(parsed, list):
+                    corrections.extend(parsed)
+        except:
+            pass
+            
+    # 2. กรณี AI ส่ง JSON มาแบบไม่มี markdown ให้กวาดหาปีกกา
+    if not corrections:
+        try:
+            start_idx = text.find('[')
+            end_idx = text.rfind(']')
+            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                potential_json = text[start_idx:end_idx+1]
+                parsed = json.loads(potential_json)
                 if isinstance(parsed, list):
                     corrections.extend(parsed)
         except:

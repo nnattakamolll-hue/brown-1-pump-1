@@ -47,7 +47,6 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
     doc = fitz.open(stream=input_pdf_bytes, filetype="pdf")
     applied_logs = []
     
-    # 1. กรองรายการที่ซ้ำกันออก
     unique_corrections = []
     seen = set()
     for item in corrections:
@@ -63,7 +62,6 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
             seen.add(key)
             unique_corrections.append(item)
 
-    # 2. จัดกลุ่มรายการตามหน้า PDF พร้อมระบบแกะพิกัด Box 2D จาก AI
     page_corrections = {}
     for item in unique_corrections:
         wrong_text = str(item.get("wrong", "")).strip()
@@ -76,13 +74,11 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
         
         inst = None
         
-        # วิธีที่ 1 (แม่นยำที่สุด): ใช้พิกัด box_2d ที่ AI สแกนภาพเจอโดยตรง
         if box_2d and isinstance(box_2d, list) and len(box_2d) == 4:
             ymin, xmin, ymax, xmax = box_2d
             w, h = page.rect.width, page.rect.height
             inst = fitz.Rect(xmin * w / 1000.0, ymin * h / 1000.0, xmax * w / 1000.0, ymax * h / 1000.0)
             
-        # วิธีที่ 2: ถ้าไม่มีพิกัด ให้ค้นหาจากคำสำคัญหลักในหน้ากระดาษ
         if not inst or inst.is_empty:
             tokens = [w for w in re.findall(r'[A-Za-z0-9ก-ฮะ-์]+', wrong_text) if len(w) >= 2]
             tokens.sort(key=lambda x: (any(char.isdigit() for char in x), len(x)), reverse=True)
@@ -93,7 +89,6 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
                     inst = found[0]
                     break
                     
-        # วิธีที่ 3: กวาดหาทั่วทุกหน้าถ้ายังไม่เจอ
         if not inst or inst.is_empty:
             for p_idx, p in enumerate(doc):
                 found = p.search_for(wrong_text[:10] if len(wrong_text) > 10 else wrong_text)
@@ -112,7 +107,6 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
                 "correct": correct_text
             })
 
-    # 3. วาดลง PDF เรียงลำดับจากบนลงล่าง ป้องกันกล่องซ้อนทับกัน
     for p_idx, items in page_corrections.items():
         page = doc[p_idx]
         items.sort(key=lambda x: x["inst"].y0)
@@ -125,7 +119,6 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
             
             y_center = (inst.y0 + inst.y1) / 2
             
-            # วาดเส้นขีดฆ่าสีแดง
             page.draw_line(
                 fitz.Point(inst.x0, y_center),
                 fitz.Point(inst.x1, y_center),
@@ -146,7 +139,6 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
             
             box_rect = fitz.Rect(box_x0, box_y0, box_x0 + box_w, box_y1)
             
-            # วาดเส้นชี้
             page.draw_line(
                 fitz.Point(inst.x1, y_center),
                 fitz.Point(box_x0, box_y0 + (box_h / 2)),
@@ -154,7 +146,6 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
                 width=1.0
             )
             
-            # วาดกล่องข้อความพื้นขาว ขอบแดง
             page.draw_rect(
                 box_rect,
                 color=(1, 0, 0),
@@ -162,7 +153,6 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
                 width=1.2
             )
             
-            # ใส่ข้อความที่ถูกต้อง
             page.insert_text(
                 fitz.Point(box_x0 + 4, box_y0 + 13),
                 correct_text,
@@ -183,8 +173,6 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
 
 def extract_sensible_corrections(text):
     corrections = []
-    
-    # ดึงข้อมูลจาก JSON Block ที่ AI ส่งมาให้อย่างแม่นยำที่สุด
     json_matches = re.findall(r'```json\s*(.*?)\s*```', text, re.DOTALL)
     for j_str in json_matches:
         try:
@@ -270,7 +258,7 @@ if st.button("เริ่มตรวจสอบและแก้ไขไฟ
                 try:
                     status_box.write(f"กำลังวิเคราะห์ข้อมูล (พยายามครั้งที่ {attempt+1}/{max_retries})...")
                     response = client.models.generate_content(
-                        model='gemini-3.8-flash',
+                        model='gemini-2.5-flash',  # เปลี่ยนมาใช้รุ่นนี้เพื่อหลีกเลี่ยงอาการ 503 Service Unavailable
                         contents=[g_a, g_b, prompt],
                         config=config
                     )

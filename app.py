@@ -67,35 +67,41 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
         wrong_text = str(item.get("wrong", "")).strip()
         correct_text = str(item.get("correct", "")).strip()
         page_hint = int(item.get("page", 1)) - 1
-        box_2d = item.get("box_2d")
         
         target_page_idx = page_hint if (0 <= page_hint < len(doc)) else 0
         page = doc[target_page_idx]
         
         inst = None
         
-        if box_2d and isinstance(box_2d, list) and len(box_2d) == 4:
-            ymin, xmin, ymax, xmax = box_2d
-            w, h = page.rect.width, page.rect.height
-            inst = fitz.Rect(xmin * w / 1000.0, ymin * h / 1000.0, xmax * w / 1000.0, ymax * h / 1000.0)
+        # 1. ค้นหาแบบตรงตัว (Exact Search บนหน้าที่ระบุ)
+        text_instances = page.search_for(wrong_text)
+        if text_instances:
+            inst = text_instances[0]
             
+        # 2. ถ้าไม่เจอ ให้กวาดค้นหาแบบตรงตัวทั่วทุกหน้า
+        if not inst or inst.is_empty:
+            for p_idx, p in enumerate(doc):
+                found = p.search_for(wrong_text)
+                if found:
+                    page = p
+                    target_page_idx = p_idx
+                    inst = found[0]
+                    break
+                    
+        # 3. ถ้ายังไม่เจอ ให้แยกคำ/รหัสสำคัญมาค้นหาแบบยืดหยุ่น (Token Substring Matching)
         if not inst or inst.is_empty:
             tokens = [w for w in re.findall(r'[A-Za-z0-9ก-ฮะ-์]+', wrong_text) if len(w) >= 2]
             tokens.sort(key=lambda x: (any(char.isdigit() for char in x), len(x)), reverse=True)
             
             for token in tokens:
-                found = page.search_for(token)
-                if found:
-                    inst = found[0]
-                    break
-                    
-        if not inst or inst.is_empty:
-            for p_idx, p in enumerate(doc):
-                found = p.search_for(wrong_text[:10] if len(wrong_text) > 10 else wrong_text)
-                if found:
-                    page = p
-                    target_page_idx = p_idx
-                    inst = found[0]
+                for p_idx, p in enumerate(doc):
+                    found = p.search_for(token)
+                    if found:
+                        page = p
+                        target_page_idx = p_idx
+                        inst = found[0]
+                        break
+                if inst and not inst.is_empty:
                     break
                         
         if inst and not inst.is_empty:
@@ -107,6 +113,7 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
                 "correct": correct_text
             })
 
+    # วาดเส้นขีดฆ่าและกล่องข้อความแก้ไขลง PDF จริง โดยจัดระยะไม่ให้ทับซ้อนกัน
     for p_idx, items in page_corrections.items():
         page = doc[p_idx]
         items.sort(key=lambda x: x["inst"].y0)
@@ -119,6 +126,7 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
             
             y_center = (inst.y0 + inst.y1) / 2
             
+            # วาดเส้นขีดฆ่าสีแดงทับข้อความที่ผิด
             page.draw_line(
                 fitz.Point(inst.x0, y_center),
                 fitz.Point(inst.x1, y_center),
@@ -139,6 +147,7 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
             
             box_rect = fitz.Rect(box_x0, box_y0, box_x0 + box_w, box_y1)
             
+            # วาดเส้นชี้จากคำผิดไปยังกล่องข้อความ
             page.draw_line(
                 fitz.Point(inst.x1, y_center),
                 fitz.Point(box_x0, box_y0 + (box_h / 2)),
@@ -146,6 +155,7 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
                 width=1.0
             )
             
+            # วาดกล่องข้อความพื้นขาว ขอบแดง
             page.draw_rect(
                 box_rect,
                 color=(1, 0, 0),
@@ -153,6 +163,7 @@ def annotate_pdf_anti_overlap(input_pdf_bytes, corrections):
                 width=1.2
             )
             
+            # ใส่ข้อความที่ถูกต้องลงในกล่อง
             page.insert_text(
                 fitz.Point(box_x0 + 4, box_y0 + 13),
                 correct_text,
@@ -215,7 +226,7 @@ if st.button("เริ่มตรวจสอบและแก้ไขไฟ
             g_b = upload_to_gemini(client, file_b)
             uploaded_files.append(g_b.name)
             
-            status_box.write("AI กำลังสแกนตรวจเทียบเอกสาร หาพิกัดตำแหน่ง และมาร์คแก้ไขลง PDF...")
+            status_box.write("AI กำลังสแกนตรวจเทียบเอกสาร หาตำแหน่งคำผิด และมาร์คแก้ไขลง PDF...")
             
             prompt = '''จงเปรียบเทียบเอกสาร B (ไฟล์ตรวจสอบ PO) กับ เอกสาร A (ไฟล์ตั้งต้น Quotation) อย่างละเอียดทุกหน้า ทุกแผ่น
 
@@ -232,14 +243,13 @@ if st.button("เริ่มตรวจสอบและแก้ไขไฟ
 สรุปภาพรวมการตรวจสอบ
 
 คำสั่งสำคัญมากสำหรับการนำจุดผิดไปวาดบน PDF:
-ที่บรรทัดท้ายสุด ให้ส่ง JSON บล็อกเดียวเท่านั้น สรุปจุดที่ผิดเพี้ยนและต้องแก้ไขจริงแบบไม่ซ้ำกัน พร้อมระบุเลขหน้า (page เริ่มจาก 1), คำที่ผิดใน B (wrong), คำที่ถูกต้องจาก A (correct), และพิกัดตำแหน่งคร่าวๆ บนหน้ากระดาษ [ymin, xmin, ymax, xmax] (สเกล 0 ถึง 1000 ใน `box_2d`):
+ที่บรรทัดท้ายสุด ให้ส่ง JSON บล็อกเดียวเท่านั้น สรุปจุดที่ผิดเพี้ยนและต้องแก้ไขจริงแบบไม่ซ้ำกัน พร้อมระบุเลขหน้า (page เริ่มจาก 1), คำหรือรหัสที่ผิดใน B (wrong), และคำที่ถูกต้องจาก A (correct):
 ```json
 [
   {
-    "page": 2,
+    "page": 1,
     "wrong": "คำหรือรหัสที่ผิดใน B",
-    "correct": "คำหรือรหัสที่ถูกต้องจาก A",
-    "box_2d": [ymin, xmin, ymax, xmax]
+    "correct": "คำหรือรหัสที่ถูกต้องจาก A"
   }
 ]
 ```'''
